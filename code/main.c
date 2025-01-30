@@ -34,6 +34,8 @@ static ID3D11DeviceContext              *g_dx11_dev_cont;
 static IDXGISwapChain1                  *g_dxgi_swap_chain;
 
 // Render Target Stuff
+//static s32                               g_dx11_resolution_width  = 1280;
+//static s32                               g_dx11_resolution_height = 720;
 static s32                               g_dx11_resolution_width  = 640;
 static s32                               g_dx11_resolution_height = 360;
 static ID3D11RenderTargetView           *g_dx11_back_buffer_rtv;
@@ -74,6 +76,14 @@ static ID3D11ShaderResourceView         *g_dx11_tex2d_brick_displace_srv;
 static ID3D11ShaderResourceView         *g_dx11_tex2d_wood_diffuse_srv;
 static ID3D11ShaderResourceView         *g_dx11_tex2d_wood_normal_srv;
 static ID3D11ShaderResourceView         *g_dx11_tex2d_wood_displace_srv;
+
+typedef u16 Shader_Type;
+enum
+{
+  ShaderType_Vertex,
+  ShaderType_Pixel,
+  ShaderType_Count,
+};
 
 typedef struct
 {
@@ -147,6 +157,13 @@ typedef struct
   ID3D11Buffer *vbuffer, *ibuffer;
   u32 struct_size, index_count;
 } DX11_Model;
+
+static DX11_Model g_dx11_cube_model;
+static DX11_Model g_dx11_sphere_model;
+static DX11_Model g_dx11_cylinder_model;
+
+static UINT g_model_vertices_stride   = sizeof(Model_Vertex);
+static UINT g_model_vertices_offsets  = 0;
 
 static Light
 create_directional_light(v3f P, v3f look_P, v4f intensity)
@@ -242,7 +259,6 @@ dx11_create_texture2d_mipmapped(char *filename)
   tex_desc.BindFlags           = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
   tex_desc.CPUAccessFlags      = 0;
   tex_desc.MiscFlags           = D3D11_RESOURCE_MISC_GENERATE_MIPS;
-
 
   AssertHR(ID3D11Device1_CreateTexture2D(g_dx11_dev, &tex_desc, 0, &tex));
 
@@ -802,6 +818,164 @@ dx11_create_depth_stencil_states(void)
   };
 
   AssertHR(ID3D11Device1_CreateDepthStencilState(g_dx11_dev, &depth_stencil_desc, &g_dx11_depth_less_stencil_nope));
+  
+  D3D11_TEXTURE2D_DESC depth_stencil_tex_desc =
+  {
+    .Width           = g_dx11_resolution_width,
+    .Height          = g_dx11_resolution_height,
+    .MipLevels       = 1,
+    .ArraySize       = 1,
+    .Format          = DXGI_FORMAT_D24_UNORM_S8_UINT,
+    .SampleDesc      = { 1, 0 },
+    .Usage           = D3D11_USAGE_DEFAULT,
+    .BindFlags       = D3D11_BIND_DEPTH_STENCIL,
+    .CPUAccessFlags  = 0,
+    .MiscFlags       = 0,
+  };
+  
+  ID3D11Texture2D *depth_stencil_tex;
+  AssertHR(ID3D11Device_CreateTexture2D(g_dx11_dev, &depth_stencil_tex_desc, 0, &depth_stencil_tex));
+  AssertHR(ID3D11Device_CreateDepthStencilView(g_dx11_dev, (ID3D11Resource *)depth_stencil_tex, 0, &g_dx11_depth_stencil_dsv_main));
+  ID3D11Texture2D_Release(depth_stencil_tex);
+}
+
+#define DX11_BlobFree(blob) ID3D10Blob_Release(blob)
+#define DX11_BlobData(blob) ID3D10Blob_GetBufferPointer(blob)
+#define DX11_BlobLength(blob) ID3D10Blob_GetBufferSize(blob)
+
+static void
+dx11_compile_shader_from_file(LPCWSTR filename, char *entry_point, char *compiler_target, ID3DBlob **code_blob, ID3DBlob **error_blob)
+{
+  HRESULT HR = D3DCompileFromFile(filename, 0, D3D_COMPILE_STANDARD_FILE_INCLUDE, entry_point, compiler_target, DX11_ShaderCompileFlags, 0, code_blob, error_blob);
+
+  if (HR == D3D11_ERROR_FILE_NOT_FOUND)
+  {
+    OutputDebugStringA("File not found");
+  }
+
+  if (*error_blob)
+  {
+    OutputDebugStringA(DX11_BlobData(*error_blob));
+  }
+
+  AssertTrue(*code_blob);
+  AssertFalse(*error_blob);
+  AssertHR(HR);
+}
+
+static ID3D11Buffer *
+dx11_create_constant_buffer(UINT struct_size, void *init_data)
+{
+  ID3D11Buffer *result = 0;
+  
+  D3D11_BUFFER_DESC cbuffer_desc =
+  {
+    .ByteWidth             = struct_size,
+    .Usage                 = D3D11_USAGE_DYNAMIC,
+    .BindFlags             = D3D11_BIND_CONSTANT_BUFFER,
+    .CPUAccessFlags        = D3D11_CPU_ACCESS_WRITE,
+    .MiscFlags             = 0,
+    .StructureByteStride   = 0,
+  };
+
+  if (init_data)
+  {  
+    D3D11_SUBRESOURCE_DATA subrec_data =
+    {
+      .pSysMem            = init_data,
+      .SysMemPitch        = struct_size,
+      .SysMemSlicePitch   = 0,
+    };
+    
+    AssertHR(ID3D11Device_CreateBuffer(g_dx11_dev, &cbuffer_desc, &subrec_data, &result));
+  }
+  else
+  {
+    AssertHR(ID3D11Device_CreateBuffer(g_dx11_dev, &cbuffer_desc, 0, &result));
+  }
+  
+  return result;
+}
+
+static void
+init_rendering_states(void)
+{
+  ID3DBlob *code_blob, *error_blob;
+
+  dx11_compile_shader_from_file(L"../code/shaders/shader_main.hlsl", "vs_main", "vs_5_0" , &code_blob, &error_blob);
+  AssertHR(ID3D11Device_CreateVertexShader(g_dx11_dev, DX11_BlobData(code_blob), DX11_BlobLength(code_blob), 0, &g_dx11_vshader_main));
+  
+  D3D11_INPUT_ELEMENT_DESC input_layout_desc[] =
+  {
+    {
+      "IA_Position", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,
+      D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0,
+    },
+
+    {
+      "IA_Tangent", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,
+      D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0,
+    },
+
+    {
+      "IA_Bitangent", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,
+      D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0,
+    },
+
+    {
+      "IA_Normal", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,
+      D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0,
+    },
+
+    {
+      "IA_TextureUV", 0, DXGI_FORMAT_R32G32_FLOAT, 0,
+      D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0,
+    },
+  };
+  
+  AssertHR(ID3D11Device_CreateInputLayout(g_dx11_dev, input_layout_desc, ArrayCount(input_layout_desc), DX11_BlobData(code_blob), DX11_BlobLength(code_blob), &g_dx11_input_layout));
+  DX11_BlobFree(code_blob);
+  
+  dx11_compile_shader_from_file(L"../code/shaders/shader_main.hlsl", "ps_main", "ps_5_0", &code_blob, &error_blob);
+  AssertHR(ID3D11Device_CreatePixelShader(g_dx11_dev, DX11_BlobData(code_blob), DX11_BlobLength(code_blob), 0, &g_dx11_pshader_main));
+  DX11_BlobFree(code_blob);
+  
+  g_dx11_cbuffer_main0 = dx11_create_constant_buffer(sizeof(DX11_CBuffer_Main0), 0);
+  g_dx11_cbuffer_main1 = dx11_create_constant_buffer(sizeof(DX11_CBuffer_Main1), 0);
+  
+  D3D11_BUFFER_DESC sbuffer_desc =
+  {
+    .ByteWidth            = sizeof(Model_Instance) * MaxModelInstances,
+    .Usage                = D3D11_USAGE_DYNAMIC,
+    .BindFlags            = D3D11_BIND_SHADER_RESOURCE,
+    .CPUAccessFlags       = D3D11_CPU_ACCESS_WRITE,
+    .MiscFlags            = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED,
+    .StructureByteStride  = sizeof(Model_Instance),
+  };
+  
+  D3D11_SHADER_RESOURCE_VIEW_DESC sbuffer_srv_desc =
+  {
+    .Format             = DXGI_FORMAT_UNKNOWN,
+    .ViewDimension      = D3D11_SRV_DIMENSION_BUFFER,
+    .Buffer             = { .NumElements = MaxModelInstances }
+  };
+  
+  AssertHR(ID3D11Device_CreateBuffer(g_dx11_dev, &sbuffer_desc, 0, &g_dx11_sbuffer_model_instances));
+  AssertHR(ID3D11Device_CreateShaderResourceView(g_dx11_dev, (ID3D11Resource *)g_dx11_sbuffer_model_instances, &sbuffer_srv_desc, &g_dx11_sbuffer_model_instances_srv));
+  
+  g_dx11_viewport_main = (D3D11_VIEWPORT)
+  {
+    .Width     = (f32)g_dx11_resolution_width,
+    .Height    = (f32)g_dx11_resolution_height,
+    .TopLeftX  = 0,
+    .TopLeftY  = 0,
+    .MinDepth  = 0,
+    .MaxDepth  = 1,
+  };
+  
+  g_dx11_cube_model       = create_cube_model();
+  g_dx11_sphere_model     = create_cylinder_model(1.0f, 1.0f, 4.0f, 8, 6);
+  g_dx11_cylinder_model   = create_sphere_model(1.0f, 24);
 }
 
 int __stdcall
@@ -852,6 +1026,8 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdSh
   dx11_create_sampler_states();
   dx11_create_depth_stencil_states();
 
+  init_rendering_states();
+
   b32 is_running = true;
   TIMECAPS tc;
   timeGetDevCaps(&tc, sizeof(tc));
@@ -869,23 +1045,13 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdSh
   QueryPerformanceCounter(&perf_count_begin);
 
   OS_InputFlag input_key[OS_KeyType_Count] = { 0 };
-
-  g_dx11_viewport_main = (D3D11_VIEWPORT)
-  {
-    .Width     = (f32)g_dx11_resolution_width,
-    .Height    = (f32)g_dx11_resolution_height,
-    .TopLeftX  = 0,
-    .TopLeftY  = 0,
-    .MinDepth  = 0,
-    .MaxDepth  = 1,
-  };
   
   // renderer state stuff
   b32 camera_roam        = false;
   v3f camera_p           = {0};
-  f32 camera_rotate_yz   = -90;
+  f32 camera_rotate_yz   = 90;
   f32 camera_rotate_xz   = 90;
-  f32 camera_sens        = 0.1f;
+  f32 camera_sens        = 4.0f;
   f32 camera_move_comp   = 8.0f;
 
   while (is_running)
@@ -1018,19 +1184,55 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdSh
       v3f_sub_eq(&camera_p, v3f_scale(move_comp, camera_up));
     }
 
-    m44 world_to_camera = (m44)
+    DX11_CBuffer_Main0 cbuffer0 =
     {
-      camera_right.x, camera_up.x, camera_front.x, 0.0f,
-      camera_right.y, camera_up.y, camera_front.y, 0.0f,
-      camera_right.z, camera_up.z, camera_front.z, 0.0f,
-      -v3f_inner(camera_right, camera_p), -v3f_inner(camera_up, camera_p), -v3f_inner(camera_front, camera_p), 1.0f
+      .projection                    = m44_make_perspective_z01(g_dx11_viewport_main.Height / g_dx11_viewport_main.Width, Radians(66.2f), 0.1f, 100.0f),
+      .world_basis_to_camera_basis   = (m44)
+                                       {
+                                         camera_right.x, camera_up.x, camera_front.x, 0.0f,
+                                         camera_right.y, camera_up.y, camera_front.y, 0.0f,
+                                         camera_right.z, camera_up.z, camera_front.z, 0.0f,
+                                         -v3f_inner(camera_right, camera_p), -v3f_inner(camera_up, camera_p), -v3f_inner(camera_front, camera_p), 1.0f
+                                       },
     };
-
-    m44 projection = m44_make_perspective_z01(g_dx11_viewport_main.Height / g_dx11_viewport_main.Width, Radians(66.2f), 0.1f, 100.0f);
 
     float clear_colour[4] = {0};
     ID3D11DeviceContext_ClearRenderTargetView(g_dx11_dev_cont, g_dx11_back_buffer_rtv, clear_colour);
+    ID3D11DeviceContext_ClearDepthStencilView(g_dx11_dev_cont, g_dx11_depth_stencil_dsv_main, D3D11_CLEAR_DEPTH, 1.0f, 0);
+    
+    D3D11_MAPPED_SUBRESOURCE mapped_subresource;
+    ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main0, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
+    CopyMemory(mapped_subresource.pData, &cbuffer0, sizeof(cbuffer0));
+    ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main0, 0);
 
+    Model_Instances instances = {0};
+    add_model_instance(&instances, (v3f){ 0.0f, 0.0f, 5.0f }, (v3f){ 1.0f, 1.0f, 1.0f }, m33_make_identity());
+    
+    ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_sbuffer_model_instances, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
+    CopyMemory(mapped_subresource.pData, instances.ins, sizeof(instances.ins));
+    ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_sbuffer_model_instances, 0);
+    
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_dx11_dev_cont, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_IASetInputLayout(g_dx11_dev_cont, g_dx11_input_layout);
+    ID3D11DeviceContext_IASetVertexBuffers(g_dx11_dev_cont, 0, 1, &(g_dx11_cube_model.vbuffer), &(g_dx11_cube_model.struct_size), &g_model_vertices_offsets);
+    ID3D11DeviceContext_IASetIndexBuffer(g_dx11_dev_cont, g_dx11_cube_model.ibuffer, DXGI_FORMAT_R32_UINT, 0);
+    
+    ID3D11DeviceContext_VSSetConstantBuffers(g_dx11_dev_cont, 0, 1, &g_dx11_cbuffer_main0);
+    ID3D11DeviceContext_VSSetShader(g_dx11_dev_cont, g_dx11_vshader_main, 0, 0);
+    ID3D11DeviceContext_VSSetShaderResources(g_dx11_dev_cont, 0, 1, &g_dx11_sbuffer_model_instances_srv);
+    
+    ID3D11DeviceContext_RSSetState(g_dx11_dev_cont, g_dx11_rasterizer_fill_cull_back_ccw);
+    ID3D11DeviceContext_RSSetViewports(g_dx11_dev_cont, 1, &g_dx11_viewport_main);
+    
+    ID3D11DeviceContext_PSSetConstantBuffers(g_dx11_dev_cont, 1, 1, &g_dx11_cbuffer_main1);
+    ID3D11DeviceContext_PSSetShader(g_dx11_dev_cont, g_dx11_pshader_main, 0, 0);
+    
+    ID3D11DeviceContext_OMSetBlendState(g_dx11_dev_cont, g_dx11_blend_alpha, 0, 0xFFFFFFFF);
+    ID3D11DeviceContext_OMSetDepthStencilState(g_dx11_dev_cont, g_dx11_depth_less_stencil_nope, 0);
+    ID3D11DeviceContext_OMSetRenderTargets(g_dx11_dev_cont, 1, &g_dx11_back_buffer_rtv, g_dx11_depth_stencil_dsv_main);
+    
+    ID3D11DeviceContext_DrawIndexedInstanced(g_dx11_dev_cont, g_dx11_cube_model.index_count, instances.count, 0, 0, 0);
+    
     ID3D11DeviceContext_ClearState(g_dx11_dev_cont);
     IDXGISwapChain1_Present(g_dxgi_swap_chain, 1, 0);
 
@@ -1049,5 +1251,6 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdSh
     
     QueryPerformanceCounter(&perf_count_begin);
   }
+  
   ExitProcess(0);
 }

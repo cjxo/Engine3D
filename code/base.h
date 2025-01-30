@@ -18,6 +18,7 @@ typedef s32      b32;
 #define AssertBreak() __debugbreak()
 #define Assert(cond) do{if(!(cond)){AssertBreak();}}while(0)
 #define AssertTrue(x) Assert((!!(x))==true)
+#define AssertFalse(x) Assert((!!(x))==false)
 #define AssertHR(hr) Assert(SUCCEEDED(hr))
 #define InvalidCodePath() AssertBreak()
 #define ArrayCount(a) (sizeof(a)/sizeof((a)[0]))

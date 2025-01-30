@@ -64,14 +64,18 @@ struct VertexShader_Output
   float3 normal    : SurfaceNormal;
 };
 
+StructuredBuffer<Model_Instance> g_model_instances : register(t0);
+
 VertexShader_Output
 vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
 {
   VertexShader_Output result = (VertexShader_Output)0;
-  float3 world_p   = mul(instance.model_to_world_xform, vs_inp.p) + instance.p;
-  float4 camera_p  = mul(world_to_camera, float4(world_p, 1.0f));
 
-  result.p         = mul(proj, camera_p);
+  Model_Instance instance = g_model_instances[iid];
+  float3 world_p          = mul(instance.model_to_world_xform, vs_inp.p) + instance.p;
+  float4 camera_p         = mul(world_basis_to_camera_basis, float4(world_p, 1.0f));
+
+  result.p         = mul(projection, camera_p);
   result.colour    = float4(1.0f, 1.0f, 1.0f, 1.0f);
   result.uv        = vs_inp.uv;
   
