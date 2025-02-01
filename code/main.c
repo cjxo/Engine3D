@@ -45,6 +45,7 @@ static ID3D11BlendState                 *g_dx11_blend_alpha;
 
 // Rasterizer States
 static ID3D11RasterizerState            *g_dx11_rasterizer_fill_cull_back_ccw;
+static ID3D11RasterizerState            *g_dx11_rasterizer_wire_cull_back_ccw;
 static ID3D11RasterizerState            *g_dx11_rasterizer_fill_cull_front_ccw;
 static ID3D11RasterizerState            *g_dx11_rasterizer_shadow_map_ccw;
 
@@ -746,6 +747,18 @@ dx11_create_rasterizer_states(void)
   raster_desc.MultisampleEnable            = FALSE;
   raster_desc.AntialiasedLineEnable        = FALSE;
   AssertHR(ID3D11Device1_CreateRasterizerState(g_dx11_dev, &raster_desc, &g_dx11_rasterizer_fill_cull_back_ccw));
+  
+  raster_desc.FillMode                     = D3D11_FILL_WIREFRAME;
+  raster_desc.CullMode                     = D3D11_CULL_BACK;
+  raster_desc.FrontCounterClockwise        = TRUE;
+  raster_desc.DepthBias                    = 0;
+  raster_desc.DepthBiasClamp               = 0.0f;
+  raster_desc.SlopeScaledDepthBias         = 0.0f;
+  raster_desc.DepthClipEnable              = TRUE;
+  raster_desc.ScissorEnable                = FALSE;
+  raster_desc.MultisampleEnable            = FALSE;
+  raster_desc.AntialiasedLineEnable        = FALSE;
+  AssertHR(ID3D11Device1_CreateRasterizerState(g_dx11_dev, &raster_desc, &g_dx11_rasterizer_wire_cull_back_ccw));
 
   raster_desc.FillMode                     = D3D11_FILL_SOLID;
   raster_desc.CullMode                     = D3D11_CULL_FRONT;
@@ -974,8 +987,168 @@ init_rendering_states(void)
   };
   
   g_dx11_cube_model       = create_cube_model();
-  g_dx11_sphere_model     = create_cylinder_model(1.0f, 1.0f, 4.0f, 8, 6);
-  g_dx11_cylinder_model   = create_sphere_model(1.0f, 24);
+  g_dx11_sphere_model     = create_sphere_model(1.0f, 8);
+  g_dx11_cylinder_model   = create_cylinder_model(1.0f, 1.0f, 4.0f, 8, 6);
+}
+
+typedef struct
+{
+  b32 camera_roam;
+  v3f camera_p;
+  f32 camera_rotate_yz;
+  f32 camera_rotate_xz;
+  f32 camera_sens;
+  f32 camera_move_comp;
+} Scene_State;
+
+static void
+scene_init(Scene_State *scene)
+{
+  scene->camera_roam        = false;
+  scene->camera_p           = v3f_zero();
+  scene->camera_rotate_yz   = 90;
+  scene->camera_rotate_xz   = 90;
+  scene->camera_sens        = 4.0f;
+  scene->camera_move_comp   = 8.0f;
+}
+
+static void
+scene_update_and_render(Scene_State *scene, f32 game_update_secs)
+{
+  if (os_key_released(OS_KeyType_Esc))
+  {
+    scene->camera_roam = !scene->camera_roam;
+  }
+
+  if (scene->camera_roam)
+  {
+    f32 mouse_delta_x, mouse_delta_y;
+    
+    POINT cursor_p;
+    GetCursorPos(&cursor_p);
+    
+    ScreenToClient(g_w32_window, &cursor_p);
+    
+    POINT middle;
+    middle.x = g_w32_window_width / 2;
+    middle.y = g_w32_window_height / 2;
+    ClientToScreen(g_w32_window, &middle);
+    SetCursorPos(middle.x, middle.y);
+    
+    mouse_delta_x = (f32)((g_w32_window_width * 0.5f) - cursor_p.x) * scene->camera_sens * game_update_secs;
+    mouse_delta_y = (f32)(cursor_p.y - (g_w32_window_height * 0.5f)) * scene->camera_sens * game_update_secs;
+    
+    scene->camera_rotate_yz += mouse_delta_y;
+    scene->camera_rotate_xz += mouse_delta_x;
+    if (scene->camera_rotate_yz < -179.0f)
+    {
+      scene->camera_rotate_yz = -179.0f;
+    }
+    
+    if (scene->camera_rotate_yz > 179.0f)
+    {
+      scene->camera_rotate_yz = 179.0f;
+    }
+    
+    if (scene->camera_rotate_yz >= 360.0f)
+    {
+      scene->camera_rotate_xz = 0.0f;
+    }
+    
+    if (scene->camera_rotate_xz <= 0.0f)
+    {
+      scene->camera_rotate_xz = 360.0f;
+    } 
+  }
+
+  f32 move_comp    = scene->camera_move_comp * game_update_secs;
+  f32 xz           = Radians(scene->camera_rotate_xz);
+  f32 yz           = Radians(scene->camera_rotate_yz);
+  v3f temp_up      = (v3f){ 0.0f, 1.0f, 0.0f };
+  v3f camera_front = v3f_normalized((v3f){ cosf(xz) * sinf(yz), cosf(yz), sinf(xz) * sinf(yz) });
+
+  f32 scaling          = v3f_inner(temp_up, camera_front);
+  v3f camera_up        = v3f_normalized(v3f_sub(temp_up, v3f_scale(scaling, camera_front)));
+  v3f camera_right     = v3f_normalized(v3f_cross(camera_up, camera_front));
+
+  if (os_key_held(OS_KeyType_W))
+  {
+    v3f_add_eq(&scene->camera_p, v3f_scale(move_comp, camera_front));
+  }
+
+  if (os_key_held(OS_KeyType_A))
+  {
+    v3f_sub_eq(&scene->camera_p, v3f_scale(move_comp, camera_right));
+  }
+
+  if (os_key_held(OS_KeyType_S))
+  {
+    v3f_sub_eq(&scene->camera_p, v3f_scale(move_comp, camera_front));
+  }
+
+  if (os_key_held(OS_KeyType_D))
+  {
+    v3f_add_eq(&scene->camera_p, v3f_scale(move_comp, camera_right));
+  }
+
+  if (os_key_held(OS_KeyType_Space))
+  {
+    v3f_add_eq(&scene->camera_p, v3f_scale(move_comp, camera_up));
+  }
+
+  if (os_key_held(OS_KeyType_X))
+  {
+    v3f_sub_eq(&scene->camera_p, v3f_scale(move_comp, camera_up));
+  }
+
+  DX11_CBuffer_Main0 cbuffer0 =
+  {
+    .projection                    = m44_make_perspective_z01(g_dx11_viewport_main.Height / g_dx11_viewport_main.Width, Radians(66.2f), 0.1f, 100.0f),
+    .world_basis_to_camera_basis   = (m44)
+                                     {
+                                       camera_right.x, camera_up.x, camera_front.x, 0.0f,
+                                       camera_right.y, camera_up.y, camera_front.y, 0.0f,
+                                       camera_right.z, camera_up.z, camera_front.z, 0.0f,
+                                       -v3f_inner(camera_right, scene->camera_p), -v3f_inner(camera_up, scene->camera_p), -v3f_inner(camera_front, scene->camera_p), 1.0f
+                                     },
+  };
+
+  float clear_colour[4] = {0};
+  ID3D11DeviceContext_ClearRenderTargetView(g_dx11_dev_cont, g_dx11_back_buffer_rtv, clear_colour);
+  ID3D11DeviceContext_ClearDepthStencilView(g_dx11_dev_cont, g_dx11_depth_stencil_dsv_main, D3D11_CLEAR_DEPTH, 1.0f, 0);
+  
+  D3D11_MAPPED_SUBRESOURCE mapped_subresource;
+  ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main0, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
+  CopyMemory(mapped_subresource.pData, &cbuffer0, sizeof(cbuffer0));
+  ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main0, 0);
+
+  Model_Instances instances = {0};
+  add_model_instance(&instances, (v3f){ 0.0f, 0.0f, 5.0f }, (v3f){ 1.0f, 1.0f, 1.0f }, m33_make_identity());
+  
+  ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_sbuffer_model_instances, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
+  CopyMemory(mapped_subresource.pData, instances.ins, sizeof(instances.ins));
+  ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_sbuffer_model_instances, 0);
+  
+  ID3D11DeviceContext_IASetPrimitiveTopology(g_dx11_dev_cont, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  ID3D11DeviceContext_IASetInputLayout(g_dx11_dev_cont, g_dx11_input_layout);
+  ID3D11DeviceContext_IASetVertexBuffers(g_dx11_dev_cont, 0, 1, &(g_dx11_sphere_model.vbuffer), &(g_dx11_sphere_model.struct_size), &g_model_vertices_offsets);
+  ID3D11DeviceContext_IASetIndexBuffer(g_dx11_dev_cont, g_dx11_sphere_model.ibuffer, DXGI_FORMAT_R32_UINT, 0);
+  
+  ID3D11DeviceContext_VSSetConstantBuffers(g_dx11_dev_cont, 0, 1, &g_dx11_cbuffer_main0);
+  ID3D11DeviceContext_VSSetShader(g_dx11_dev_cont, g_dx11_vshader_main, 0, 0);
+  ID3D11DeviceContext_VSSetShaderResources(g_dx11_dev_cont, 0, 1, &g_dx11_sbuffer_model_instances_srv);
+  
+  ID3D11DeviceContext_RSSetState(g_dx11_dev_cont, g_dx11_rasterizer_wire_cull_back_ccw);
+  ID3D11DeviceContext_RSSetViewports(g_dx11_dev_cont, 1, &g_dx11_viewport_main);
+  
+  ID3D11DeviceContext_PSSetConstantBuffers(g_dx11_dev_cont, 1, 1, &g_dx11_cbuffer_main1);
+  ID3D11DeviceContext_PSSetShader(g_dx11_dev_cont, g_dx11_pshader_main, 0, 0);
+  
+  ID3D11DeviceContext_OMSetBlendState(g_dx11_dev_cont, g_dx11_blend_alpha, 0, 0xFFFFFFFF);
+  ID3D11DeviceContext_OMSetDepthStencilState(g_dx11_dev_cont, g_dx11_depth_less_stencil_nope, 0);
+  ID3D11DeviceContext_OMSetRenderTargets(g_dx11_dev_cont, 1, &g_dx11_back_buffer_rtv, g_dx11_depth_stencil_dsv_main);
+  
+  ID3D11DeviceContext_DrawIndexedInstanced(g_dx11_dev_cont, g_dx11_sphere_model.index_count, (UINT)instances.count, 0, 0, 0);
 }
 
 int __stdcall
@@ -1028,7 +1201,6 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdSh
 
   init_rendering_states();
 
-  b32 is_running = true;
   TIMECAPS tc;
   timeGetDevCaps(&tc, sizeof(tc));
   timeBeginPeriod(tc.wPeriodMin);
@@ -1044,195 +1216,15 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdSh
   LARGE_INTEGER perf_count_begin;
   QueryPerformanceCounter(&perf_count_begin);
 
-  OS_InputFlag input_key[OS_KeyType_Count] = { 0 };
+  Scene_State scene;
+  scene_init(&scene);
   
-  // renderer state stuff
-  b32 camera_roam        = false;
-  v3f camera_p           = {0};
-  f32 camera_rotate_yz   = 90;
-  f32 camera_rotate_xz   = 90;
-  f32 camera_sens        = 4.0f;
-  f32 camera_move_comp   = 8.0f;
-
-  while (is_running)
+  while (true)
   {
-    for (u32 key = 0; key < OS_KeyType_Count; ++key)
-    {
-      input_key[key] &= ~(OS_InputFlag_Pressed | OS_InputFlag_Released);
-    }
-
-    MSG msg;
-    while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE) != 0)
-    {
-      switch (msg.message)
-      {
-        case WM_QUIT:
-        {
-          is_running = 0;
-        } break;
-
-        case WM_KEYDOWN:
-        {
-          OS_KeyType key = w32_map_wparam_to_keytype(msg.wParam);
-          if (key != OS_KeyType_Count)
-          {
-            input_key[key] |= OS_InputFlag_Pressed | OS_InputFlag_Held;
-          }
-        } break;
-
-        case WM_KEYUP:
-        {
-          OS_KeyType key = w32_map_wparam_to_keytype(msg.wParam);
-          if (key != OS_KeyType_Count)
-          {
-            input_key[key] |= OS_InputFlag_Released;
-            input_key[key] &= ~OS_InputFlag_Held;
-          }
-        } break;
-
-        default:
-        {
-          TranslateMessage(&msg); 
-          DispatchMessage(&msg);
-        } break;
-      }
-    }
-
-    if (input_key[OS_KeyType_Esc] & OS_InputFlag_Released)
-    {
-      camera_roam = !camera_roam;
-    }
-
-    if (camera_roam)
-    {
-      f32 mouse_delta_x, mouse_delta_y;
-      
-      POINT cursor_p;
-      GetCursorPos(&cursor_p);
-      
-      ScreenToClient(g_w32_window, &cursor_p);
-      
-      POINT middle;
-      middle.x = g_w32_window_width / 2;
-      middle.y = g_w32_window_height / 2;
-      ClientToScreen(g_w32_window, &middle);
-      SetCursorPos(middle.x, middle.y);
-      
-      mouse_delta_x = (f32)((g_w32_window_width * 0.5f) - cursor_p.x) * camera_sens * game_update_secs;
-      mouse_delta_y = (f32)(cursor_p.y - (g_w32_window_height * 0.5f)) * camera_sens * game_update_secs;
-      
-      camera_rotate_yz += mouse_delta_y;
-      camera_rotate_xz += mouse_delta_x;
-      if (camera_rotate_yz < -179.0f)
-      {
-        camera_rotate_yz = -179.0f;
-      }
-      
-      if (camera_rotate_yz > 179.0f)
-      {
-        camera_rotate_yz = 179.0f;
-      }
-      
-      if (camera_rotate_yz >= 360.0f)
-      {
-        camera_rotate_xz = 0.0f;
-      }
-      
-      if (camera_rotate_xz <= 0.0f)
-      {
-        camera_rotate_xz = 360.0f;
-      } 
-    }
-
-    f32 move_comp    = camera_move_comp * game_update_secs;
-    f32 xz           = Radians(camera_rotate_xz);
-    f32 yz           = Radians(camera_rotate_yz);
-    v3f temp_up      = (v3f){ 0.0f, 1.0f, 0.0f };
-    v3f camera_front = v3f_normalized((v3f){ cosf(xz) * sinf(yz), cosf(yz), sinf(xz) * sinf(yz) });
-
-    f32 scaling          = v3f_inner(temp_up, camera_front);
-    v3f camera_up        = v3f_normalized(v3f_sub(temp_up, v3f_scale(scaling, camera_front)));
-    v3f camera_right     = v3f_normalized(v3f_cross(camera_up, camera_front));
-
-    if (input_key[OS_KeyType_W] & OS_InputFlag_Held)
-    {
-      v3f_add_eq(&camera_p, v3f_scale(move_comp, camera_front));
-    }
-
-    if (input_key[OS_KeyType_A] & OS_InputFlag_Held)
-    {
-      v3f_sub_eq(&camera_p, v3f_scale(move_comp, camera_right));
-    }
-
-    if (input_key[OS_KeyType_S] & OS_InputFlag_Held)
-    {
-      v3f_sub_eq(&camera_p, v3f_scale(move_comp, camera_front));
-    }
-
-    if (input_key[OS_KeyType_D] & OS_InputFlag_Held)
-    {
-      v3f_add_eq(&camera_p, v3f_scale(move_comp, camera_right));
-    }
-
-    if (input_key[OS_KeyType_Space] & OS_InputFlag_Held)
-    {
-      v3f_add_eq(&camera_p, v3f_scale(move_comp, camera_up));
-    }
-
-    if (input_key[OS_KeyType_X] & OS_InputFlag_Held)
-    {
-      v3f_sub_eq(&camera_p, v3f_scale(move_comp, camera_up));
-    }
-
-    DX11_CBuffer_Main0 cbuffer0 =
-    {
-      .projection                    = m44_make_perspective_z01(g_dx11_viewport_main.Height / g_dx11_viewport_main.Width, Radians(66.2f), 0.1f, 100.0f),
-      .world_basis_to_camera_basis   = (m44)
-                                       {
-                                         camera_right.x, camera_up.x, camera_front.x, 0.0f,
-                                         camera_right.y, camera_up.y, camera_front.y, 0.0f,
-                                         camera_right.z, camera_up.z, camera_front.z, 0.0f,
-                                         -v3f_inner(camera_right, camera_p), -v3f_inner(camera_up, camera_p), -v3f_inner(camera_front, camera_p), 1.0f
-                                       },
-    };
-
-    float clear_colour[4] = {0};
-    ID3D11DeviceContext_ClearRenderTargetView(g_dx11_dev_cont, g_dx11_back_buffer_rtv, clear_colour);
-    ID3D11DeviceContext_ClearDepthStencilView(g_dx11_dev_cont, g_dx11_depth_stencil_dsv_main, D3D11_CLEAR_DEPTH, 1.0f, 0);
+    os_input_fill_events();
     
-    D3D11_MAPPED_SUBRESOURCE mapped_subresource;
-    ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main0, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
-    CopyMemory(mapped_subresource.pData, &cbuffer0, sizeof(cbuffer0));
-    ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main0, 0);
-
-    Model_Instances instances = {0};
-    add_model_instance(&instances, (v3f){ 0.0f, 0.0f, 5.0f }, (v3f){ 1.0f, 1.0f, 1.0f }, m33_make_identity());
-    
-    ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_sbuffer_model_instances, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
-    CopyMemory(mapped_subresource.pData, instances.ins, sizeof(instances.ins));
-    ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_sbuffer_model_instances, 0);
-    
-    ID3D11DeviceContext_IASetPrimitiveTopology(g_dx11_dev_cont, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ID3D11DeviceContext_IASetInputLayout(g_dx11_dev_cont, g_dx11_input_layout);
-    ID3D11DeviceContext_IASetVertexBuffers(g_dx11_dev_cont, 0, 1, &(g_dx11_cube_model.vbuffer), &(g_dx11_cube_model.struct_size), &g_model_vertices_offsets);
-    ID3D11DeviceContext_IASetIndexBuffer(g_dx11_dev_cont, g_dx11_cube_model.ibuffer, DXGI_FORMAT_R32_UINT, 0);
-    
-    ID3D11DeviceContext_VSSetConstantBuffers(g_dx11_dev_cont, 0, 1, &g_dx11_cbuffer_main0);
-    ID3D11DeviceContext_VSSetShader(g_dx11_dev_cont, g_dx11_vshader_main, 0, 0);
-    ID3D11DeviceContext_VSSetShaderResources(g_dx11_dev_cont, 0, 1, &g_dx11_sbuffer_model_instances_srv);
-    
-    ID3D11DeviceContext_RSSetState(g_dx11_dev_cont, g_dx11_rasterizer_fill_cull_back_ccw);
-    ID3D11DeviceContext_RSSetViewports(g_dx11_dev_cont, 1, &g_dx11_viewport_main);
-    
-    ID3D11DeviceContext_PSSetConstantBuffers(g_dx11_dev_cont, 1, 1, &g_dx11_cbuffer_main1);
-    ID3D11DeviceContext_PSSetShader(g_dx11_dev_cont, g_dx11_pshader_main, 0, 0);
-    
-    ID3D11DeviceContext_OMSetBlendState(g_dx11_dev_cont, g_dx11_blend_alpha, 0, 0xFFFFFFFF);
-    ID3D11DeviceContext_OMSetDepthStencilState(g_dx11_dev_cont, g_dx11_depth_less_stencil_nope, 0);
-    ID3D11DeviceContext_OMSetRenderTargets(g_dx11_dev_cont, 1, &g_dx11_back_buffer_rtv, g_dx11_depth_stencil_dsv_main);
-    
-    ID3D11DeviceContext_DrawIndexedInstanced(g_dx11_dev_cont, g_dx11_cube_model.index_count, instances.count, 0, 0, 0);
-    
+    scene_update_and_render(&scene, game_update_secs);
+        
     ID3D11DeviceContext_ClearState(g_dx11_dev_cont);
     IDXGISwapChain1_Present(g_dxgi_swap_chain, 1, 0);
 

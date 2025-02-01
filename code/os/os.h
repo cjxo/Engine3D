@@ -31,4 +31,9 @@ enum
   OS_ButtonType_Count,
 };
 
+#define os_key_pressed(key) !!(g_input_key[key]&OS_InputFlag_Pressed)
+#define os_key_released(key) !!(g_input_key[key]&OS_InputFlag_Released)
+#define os_key_held(key) !!(g_input_key[key]&OS_InputFlag_Held)
+static void os_input_fill_events(void);
+
 #endif

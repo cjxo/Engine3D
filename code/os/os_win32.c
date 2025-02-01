@@ -1,3 +1,5 @@
+static OS_InputFlag g_input_key[OS_KeyType_Count] = { 0 };
+
 static OS_KeyType
 w32_map_wparam_to_keytype(WPARAM wParam)
 {
@@ -67,4 +69,50 @@ w32_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
   }
   
   return(result);
+}
+
+static void
+os_input_fill_events(void)
+{
+  for (u32 key = 0; key < OS_KeyType_Count; ++key)
+  {
+    g_input_key[key] &= ~(OS_InputFlag_Pressed | OS_InputFlag_Released);
+  }
+
+  MSG msg;
+  while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE) != 0)
+  {
+    switch (msg.message)
+    {
+      case WM_QUIT:
+      {
+        ExitProcess(0);
+      } break;
+
+      case WM_KEYDOWN:
+      {
+        OS_KeyType key = w32_map_wparam_to_keytype(msg.wParam);
+        if (key != OS_KeyType_Count)
+        {
+          g_input_key[key] |= OS_InputFlag_Pressed | OS_InputFlag_Held;
+        }
+      } break;
+
+      case WM_KEYUP:
+      {
+        OS_KeyType key = w32_map_wparam_to_keytype(msg.wParam);
+        if (key != OS_KeyType_Count)
+        {
+          g_input_key[key] |= OS_InputFlag_Released;
+          g_input_key[key] &= ~OS_InputFlag_Held;
+        }
+      } break;
+
+      default:
+      {
+        TranslateMessage(&msg); 
+        DispatchMessage(&msg);
+      } break;
+    }
+  }
 }
