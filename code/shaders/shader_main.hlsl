@@ -43,6 +43,7 @@ struct Model_Instance
   float3x3 model_to_world_xform;
   float3x3 model_to_world_xform_inverse_transpose;
   float3 p;
+  float4 colour;
 };
 
 struct VertexShader_Input
@@ -76,7 +77,7 @@ vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
   float4 camera_p         = mul(world_basis_to_camera_basis, float4(world_p, 1.0f));
 
   result.p         = mul(projection, camera_p);
-  result.colour    = float4(1.0f, 1.0f, 1.0f, 1.0f);
+  result.colour    = instance.colour;
   result.uv        = vs_inp.uv;
   
   result.world_p   = world_p;

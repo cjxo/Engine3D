@@ -29,6 +29,7 @@ typedef union
   f32 v[3];
 } v3f;
 
+#define v3f_s(s) (v3f){(s),(s),(s)}
 #define v3f_zero() (v3f){0.0f,0.0f,0.0f}
 static f32  v3f_inner(v3f a, v3f b);
 static v3f  v3f_cross(v3f a, v3f b);

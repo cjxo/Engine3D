@@ -36,8 +36,10 @@ static IDXGISwapChain1                  *g_dxgi_swap_chain;
 // Render Target Stuff
 //static s32                               g_dx11_resolution_width  = 1280;
 //static s32                               g_dx11_resolution_height = 720;
-static s32                               g_dx11_resolution_width  = 640;
-static s32                               g_dx11_resolution_height = 360;
+//static s32                               g_dx11_resolution_width  = 640;
+//static s32                               g_dx11_resolution_height = 360;
+static s32                               g_dx11_resolution_width  = 320;
+static s32                               g_dx11_resolution_height = 180;
 static ID3D11RenderTargetView           *g_dx11_back_buffer_rtv;
 
 // Blend State
@@ -98,6 +100,7 @@ typedef struct
   m33 model_to_world_xform;
   m33 model_to_world_xform_it;
   v3f p;
+  v4f colour;
 } Model_Instance;
 
 #define MaxLightCount 8
@@ -125,7 +128,7 @@ typedef struct
   m44 projection;
 } Light;
 
-#define MaxModelInstances 512
+#define MaxModelInstances 2048
 typedef struct
 {
   Model_Instance ins[MaxModelInstances];
@@ -159,9 +162,10 @@ typedef struct
   u32 struct_size, index_count;
 } DX11_Model;
 
-static DX11_Model g_dx11_cube_model;
-static DX11_Model g_dx11_sphere_model;
-static DX11_Model g_dx11_cylinder_model;
+static DX11_Model *g_dx11_current_model;
+static DX11_Model  g_dx11_cube_model;
+static DX11_Model  g_dx11_sphere_model;
+static DX11_Model  g_dx11_cylinder_model;
 
 static UINT g_model_vertices_stride   = sizeof(Model_Vertex);
 static UINT g_model_vertices_offsets  = 0;
@@ -278,14 +282,8 @@ dx11_create_texture2d_mipmapped(char *filename)
   return(result);
 }
 
-#define MapWidth 26
-#define MapDepth 20
-#define MapHeight 5
-#define BrickDim 2.0f
-#define PillarCount 5
-
 static Model_Instance *
-add_model_instance(Model_Instances *instances, v3f p, v3f scale, m33 rotate)
+add_model_instance(Model_Instances *instances, v3f p, v3f scale, m33 rotate, v4f colour)
 {
   Assert(instances->count < MaxModelInstances);
   Model_Instance *result = instances->ins + instances->count++;
@@ -293,6 +291,7 @@ add_model_instance(Model_Instances *instances, v3f p, v3f scale, m33 rotate)
   result->model_to_world_xform                  = m33_mul(m33_make_diag(scale), rotate);
   result->model_to_world_xform_it               = m33_mul(m33_make_diag((v3f) { 1.0f / scale.x, 1.0f / scale.y, 1.0f / scale.z }), rotate);
   result->p                                     = p;
+  result->colour                                = colour;
   return(result);
 }
 
@@ -991,6 +990,32 @@ init_rendering_states(void)
   g_dx11_cylinder_model   = create_cylinder_model(1.0f, 1.0f, 4.0f, 8, 6);
 }
 
+static void
+dx11_set_model(DX11_Model *model)
+{
+  AssertTrue(model != 0);
+  g_dx11_current_model = model;
+  ID3D11DeviceContext_IASetInputLayout(g_dx11_dev_cont, g_dx11_input_layout);
+  ID3D11DeviceContext_IASetVertexBuffers(g_dx11_dev_cont, 0, 1, &(model->vbuffer), &(model->struct_size), &g_model_vertices_offsets);
+  ID3D11DeviceContext_IASetIndexBuffer(g_dx11_dev_cont, model->ibuffer, DXGI_FORMAT_R32_UINT, 0);
+}
+
+static void
+dx11_draw_indexed_instanced(Model_Instances *instances)
+{
+  AssertTrue(g_dx11_current_model && instances);
+  if (instances->count)
+  {
+    D3D11_MAPPED_SUBRESOURCE mapped_subresource;
+    ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_sbuffer_model_instances, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
+    CopyMemory(mapped_subresource.pData, instances->ins, sizeof(instances->ins));
+    ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_sbuffer_model_instances, 0);
+    ID3D11DeviceContext_DrawIndexedInstanced(g_dx11_dev_cont, g_dx11_current_model->index_count, (UINT)instances->count, 0, 0, 0);
+    
+    instances->count = 0;
+  }
+}
+
 typedef struct
 {
   b32 camera_roam;
@@ -1001,6 +1026,10 @@ typedef struct
   f32 camera_move_comp;
 } Scene_State;
 
+#define ScenePlatform_BlockCountDepth 40
+#define ScenePlatform_BlockCountWidth 40
+#define Scene_BlockWidth 2.0f
+#define Scene_PillarCount 3
 static void
 scene_init(Scene_State *scene)
 {
@@ -1122,23 +1151,14 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   CopyMemory(mapped_subresource.pData, &cbuffer0, sizeof(cbuffer0));
   ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main0, 0);
 
-  Model_Instances instances = {0};
-  add_model_instance(&instances, (v3f){ 0.0f, 0.0f, 5.0f }, (v3f){ 1.0f, 1.0f, 1.0f }, m33_make_identity());
-  
-  ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_sbuffer_model_instances, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
-  CopyMemory(mapped_subresource.pData, instances.ins, sizeof(instances.ins));
-  ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_sbuffer_model_instances, 0);
-  
   ID3D11DeviceContext_IASetPrimitiveTopology(g_dx11_dev_cont, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   ID3D11DeviceContext_IASetInputLayout(g_dx11_dev_cont, g_dx11_input_layout);
-  ID3D11DeviceContext_IASetVertexBuffers(g_dx11_dev_cont, 0, 1, &(g_dx11_sphere_model.vbuffer), &(g_dx11_sphere_model.struct_size), &g_model_vertices_offsets);
-  ID3D11DeviceContext_IASetIndexBuffer(g_dx11_dev_cont, g_dx11_sphere_model.ibuffer, DXGI_FORMAT_R32_UINT, 0);
-  
+    
   ID3D11DeviceContext_VSSetConstantBuffers(g_dx11_dev_cont, 0, 1, &g_dx11_cbuffer_main0);
   ID3D11DeviceContext_VSSetShader(g_dx11_dev_cont, g_dx11_vshader_main, 0, 0);
   ID3D11DeviceContext_VSSetShaderResources(g_dx11_dev_cont, 0, 1, &g_dx11_sbuffer_model_instances_srv);
   
-  ID3D11DeviceContext_RSSetState(g_dx11_dev_cont, g_dx11_rasterizer_wire_cull_back_ccw);
+  ID3D11DeviceContext_RSSetState(g_dx11_dev_cont, g_dx11_rasterizer_fill_cull_back_ccw);
   ID3D11DeviceContext_RSSetViewports(g_dx11_dev_cont, 1, &g_dx11_viewport_main);
   
   ID3D11DeviceContext_PSSetConstantBuffers(g_dx11_dev_cont, 1, 1, &g_dx11_cbuffer_main1);
@@ -1148,7 +1168,33 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   ID3D11DeviceContext_OMSetDepthStencilState(g_dx11_dev_cont, g_dx11_depth_less_stencil_nope, 0);
   ID3D11DeviceContext_OMSetRenderTargets(g_dx11_dev_cont, 1, &g_dx11_back_buffer_rtv, g_dx11_depth_stencil_dsv_main);
   
-  ID3D11DeviceContext_DrawIndexedInstanced(g_dx11_dev_cont, g_dx11_sphere_model.index_count, (UINT)instances.count, 0, 0, 0);
+  Model_Instances instances = {0};
+  dx11_set_model(&g_dx11_cube_model);
+  // platform
+  for (s32 depth_idx = 0; depth_idx < ScenePlatform_BlockCountDepth; ++depth_idx)
+  {
+    for (s32 width_idx = 0; width_idx < ScenePlatform_BlockCountWidth; ++width_idx)
+    {
+      add_model_instance(&instances, (v3f){ (f32)(width_idx) * Scene_BlockWidth, 0.0f, (f32)(depth_idx) * Scene_BlockWidth },
+                        (v3f){ Scene_BlockWidth, Scene_BlockWidth, Scene_BlockWidth },
+                        m33_make_identity(),
+                        (v4f){ 0.5f, 0.5f, 0.5f, 1.0f });
+    }
+  }
+  dx11_draw_indexed_instanced(&instances);
+  
+  // pillars
+  {
+    dx11_set_model(&g_dx11_cylinder_model);
+    
+    f32 offset_per_pillar = ((ScenePlatform_BlockCountDepth * Scene_BlockWidth) * 0.5f) / Scene_PillarCount;
+    for (s32 pillar_idx = 0; pillar_idx < Scene_PillarCount; ++pillar_idx)
+    {
+      add_model_instance(&instances, (v3f){ Scene_BlockWidth, 3.0f, (f32)(pillar_idx + 1) * offset_per_pillar },
+                        v3f_s(1.0f), m33_make_identity(), (v4f){ 1.0f, 0.0f, 0.0f, 1.0f });
+    }
+    dx11_draw_indexed_instanced(&instances);
+  }
 }
 
 int __stdcall
@@ -1225,6 +1271,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdSh
     
     scene_update_and_render(&scene, game_update_secs);
         
+    g_dx11_current_model = 0;
     ID3D11DeviceContext_ClearState(g_dx11_dev_cont);
     IDXGISwapChain1_Present(g_dxgi_swap_chain, 1, 0);
 
