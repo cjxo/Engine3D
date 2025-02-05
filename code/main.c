@@ -665,7 +665,7 @@ dx11_create_swap_chain(void)
         DXGI_SWAP_CHAIN_DESC1 swap_chain_desc = {0};
         swap_chain_desc.Width              = g_dx11_resolution_width;
         swap_chain_desc.Height             = g_dx11_resolution_height;
-        swap_chain_desc.Format             = DXGI_FORMAT_B8G8R8A8_UNORM;
+        swap_chain_desc.Format             = DXGI_FORMAT_R8G8B8A8_UNORM;
         swap_chain_desc.Stereo             = FALSE;
         swap_chain_desc.SampleDesc.Count   = 1;
         swap_chain_desc.SampleDesc.Quality = 0;
@@ -685,7 +685,7 @@ dx11_create_swap_chain(void)
           if (SUCCEEDED(IDXGISwapChain1_GetBuffer(g_dxgi_swap_chain, 0, &IID_ID3D11Texture2D, &back_buffer_tex)))
           {
             D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = { 0 };
-            rtv_desc.Format              = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+            rtv_desc.Format              = DXGI_FORMAT_R8G8B8A8_UNORM;
             rtv_desc.ViewDimension       = D3D11_RTV_DIMENSION_TEXTURE2D;
             rtv_desc.Texture2D.MipSlice  = 0;
             if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(g_dx11_dev, (ID3D11Resource *)back_buffer_tex,
@@ -1029,7 +1029,7 @@ typedef struct
 #define ScenePlatform_BlockCountDepth 40
 #define ScenePlatform_BlockCountWidth 40
 #define Scene_BlockWidth 2.0f
-#define Scene_PillarCount 3
+#define Scene_PillarCount 9
 static void
 scene_init(Scene_State *scene)
 {
@@ -1037,7 +1037,7 @@ scene_init(Scene_State *scene)
   scene->camera_p           = v3f_zero();
   scene->camera_rotate_yz   = 90;
   scene->camera_rotate_xz   = 90;
-  scene->camera_sens        = 4.0f;
+  scene->camera_sens        = 6.0f;
   scene->camera_move_comp   = 8.0f;
 }
 
@@ -1047,6 +1047,7 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   if (os_key_released(OS_KeyType_Esc))
   {
     scene->camera_roam = !scene->camera_roam;
+    ShowCursor(!scene->camera_roam);
   }
 
   if (scene->camera_roam)
@@ -1132,7 +1133,7 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
 
   DX11_CBuffer_Main0 cbuffer0 =
   {
-    .projection                    = m44_make_perspective_z01(g_dx11_viewport_main.Height / g_dx11_viewport_main.Width, Radians(66.2f), 0.1f, 100.0f),
+    .projection                    = m44_make_perspective_z01(g_dx11_viewport_main.Height / g_dx11_viewport_main.Width, Radians(66.2f), 0.1f, 1000.0f),
     .world_basis_to_camera_basis   = (m44)
                                      {
                                        camera_right.x, camera_up.x, camera_front.x, 0.0f,
@@ -1159,6 +1160,7 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   ID3D11DeviceContext_VSSetShaderResources(g_dx11_dev_cont, 0, 1, &g_dx11_sbuffer_model_instances_srv);
   
   ID3D11DeviceContext_RSSetState(g_dx11_dev_cont, g_dx11_rasterizer_fill_cull_back_ccw);
+  //ID3D11DeviceContext_RSSetState(g_dx11_dev_cont, g_dx11_rasterizer_wire_cull_back_ccw);
   ID3D11DeviceContext_RSSetViewports(g_dx11_dev_cont, 1, &g_dx11_viewport_main);
   
   ID3D11DeviceContext_PSSetConstantBuffers(g_dx11_dev_cont, 1, 1, &g_dx11_cbuffer_main1);
@@ -1168,6 +1170,9 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   ID3D11DeviceContext_OMSetDepthStencilState(g_dx11_dev_cont, g_dx11_depth_less_stencil_nope, 0);
   ID3D11DeviceContext_OMSetRenderTargets(g_dx11_dev_cont, 1, &g_dx11_back_buffer_rtv, g_dx11_depth_stencil_dsv_main);
   
+
+  f32 scene_width_size      = ((ScenePlatform_BlockCountWidth) * Scene_BlockWidth);
+  f32 scene_depth_size      = ((ScenePlatform_BlockCountDepth) * Scene_BlockWidth);
   Model_Instances instances = {0};
   dx11_set_model(&g_dx11_cube_model);
   // platform
@@ -1181,20 +1186,123 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
                         (v4f){ 0.5f, 0.5f, 0.5f, 1.0f });
     }
   }
+
+  // "roof"
+
+  for (s32 line_idx = 0; line_idx < 2; ++line_idx)
+  {
+    for (s32 depth_idx = 0; depth_idx < ScenePlatform_BlockCountDepth; ++depth_idx)
+    {
+      add_model_instance(&instances,
+                        (v3f)
+                        {
+                          (scene_width_size - Scene_BlockWidth) * line_idx,
+                          9.0f * Scene_BlockWidth,
+                          (f32)(depth_idx) * Scene_BlockWidth
+                        },
+                        (v3f){ Scene_BlockWidth, Scene_BlockWidth, Scene_BlockWidth },
+                        m33_make_identity(),
+                        (v4f){ 0.5f, 0.5f, 0.5f, 1.0f });
+    } 
+  }
+
+  {
+    for (s32 line_idx = 0; line_idx <= (ScenePlatform_BlockCountWidth / 8); ++line_idx)
+    {
+      s32 interval      = 4;
+      s32 y_level_min   = 9;
+      s32 y_level_max   = y_level_min + ((ScenePlatform_BlockCountWidth / 2) / interval);
+      s32 y_level       = y_level_min;
+      s32 direction     = 1;
+      for (s32 width_idx = 1; width_idx < (ScenePlatform_BlockCountWidth - 1); ++width_idx)
+      {
+        if ((width_idx % interval) == 0)
+        {
+          y_level += direction;
+          if (y_level >= y_level_max)
+          {
+            direction = -1;
+          }    
+        }
+        add_model_instance(&instances,
+                          (v3f)
+                          {
+                            (f32)width_idx * Scene_BlockWidth,
+                            y_level * Scene_BlockWidth,
+                            (f32)(line_idx) * 8 * Scene_BlockWidth,
+                          },
+                          (v3f){ Scene_BlockWidth, Scene_BlockWidth, Scene_BlockWidth },
+                          m33_make_identity(),
+                          (v4f){ 0.5f, 0.5f, 0.5f, 1.0f });
+      }
+    }
+  }
+
   dx11_draw_indexed_instanced(&instances);
   
   // pillars
   {
     dx11_set_model(&g_dx11_cylinder_model);
     
-    f32 offset_per_pillar = ((ScenePlatform_BlockCountDepth * Scene_BlockWidth) * 0.5f) / Scene_PillarCount;
-    for (s32 pillar_idx = 0; pillar_idx < Scene_PillarCount; ++pillar_idx)
+    f32 cylinder_diameter     = 2.0f;
+    f32 offset_per_pillar     = (scene_depth_size / cylinder_diameter) / (Scene_PillarCount);
+    f32 total_length_spanned  = (Scene_PillarCount - 1) * cylinder_diameter + offset_per_pillar * (Scene_PillarCount - 1);
+    f32 offset                = (scene_depth_size - total_length_spanned) * 0.5f;
+
+    for (s32 pillar_set_idx = 0; pillar_set_idx < 2; ++pillar_set_idx)
     {
-      add_model_instance(&instances, (v3f){ Scene_BlockWidth, 3.0f, (f32)(pillar_idx + 1) * offset_per_pillar },
-                        v3f_s(1.0f), m33_make_identity(), (v4f){ 1.0f, 0.0f, 0.0f, 1.0f });
+      for (s32 pillar_idx = 0; pillar_idx < Scene_PillarCount; ++pillar_idx)
+      {
+        f32 x = (scene_width_size * pillar_set_idx - Scene_BlockWidth * pillar_set_idx);
+        f32 y = 9.0f;
+        f32 z = (f32)pillar_idx * cylinder_diameter + offset_per_pillar * pillar_idx + offset;
+        add_model_instance(&instances, (v3f) { x, y, z },
+                          (v3f){ 1.0f, 4.0f, 1.0f }, m33_make_identity(), (v4f){ 1.0f, 0.0f, 0.0f, 1.0f });
+
+
+        add_model_instance(&instances, (v3f) { x  + (Scene_BlockWidth * 4 * (pillar_set_idx == 0 ? 1 : -1)), 5, z },
+                          (v3f){ 2.0f, 2.0f, 2.0f }, m33_make_identity(), (v4f){ 0.0f, 1.0f, 1.0f, 1.0f });
+      }
     }
     dx11_draw_indexed_instanced(&instances);
+
+    dx11_set_model(&g_dx11_sphere_model);
+
+    for (s32 pillar_set_idx = 0; pillar_set_idx < 2; ++pillar_set_idx)
+    {
+      for (s32 pillar_idx = 0; pillar_idx < Scene_PillarCount; ++pillar_idx)
+      {
+        add_model_instance(&instances,
+                          (v3f)
+                          {
+                            (scene_width_size * pillar_set_idx - Scene_BlockWidth * pillar_set_idx) + (Scene_BlockWidth * 4 * (pillar_set_idx == 0 ? 1 : -1)),
+                            10.0f,
+                            (f32)pillar_idx * cylinder_diameter + offset_per_pillar * pillar_idx + offset
+                          },
+                          (v3f){ 1.0f, 1.0f, 1.0f }, m33_make_identity(), (v4f){ 1.0f, 1.0f, 1.0f, 1.0f });
+      }
+    }
   }
+
+  // reflective sphere
+  {
+    f32 sphere_x = scene_width_size * 0.5f;
+    f32 sphere_z = scene_depth_size * 0.5f;
+    add_model_instance(&instances,
+                      (v3f)
+                      {
+                        sphere_x,
+                        Scene_BlockWidth + 6,
+                        sphere_z
+                      },
+                      v3f_s(8.0f), m33_make_identity(), (v4f){ 1.0f, 1.0f, 1.0f, 1.0f });
+  }
+  
+  // sphere on top of pillars
+  {
+  }
+
+  dx11_draw_indexed_instanced(&instances);
 }
 
 int __stdcall
@@ -1231,7 +1339,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdSh
   };
   AdjustWindowRect(&w32_client_rect, WS_OVERLAPPEDWINDOW, FALSE);
   
-  g_w32_window  = CreateWindowA(wnd_class.lpszClassName, "D3D11 - HLSL", WS_OVERLAPPEDWINDOW,
+  g_w32_window  = CreateWindowA(wnd_class.lpszClassName, "Learning Basic CG before transitioning to PBR / Realistic Lights / Global Illum!", WS_OVERLAPPEDWINDOW,
                                 0, 0, w32_client_rect.right - w32_client_rect.left, w32_client_rect.bottom - w32_client_rect.top,
                                 0, 0, wnd_class.hInstance, 0);
   AssertTrue(IsWindow(g_w32_window));

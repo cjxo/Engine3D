@@ -85,6 +85,41 @@ vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
   return(result);
 }
 
+// Given an energy x to a pixel, to the monitor, it would appear x^(2).
+// The display transfer function (DTF) describes the relationship between digital
+// values on the render target and the radiance levels shown by monitors.
+// The DTF is part of the hardware. The DTF for most computers follow
+// the sRGB color space spec.
+
+// Hence, what we want is a "cancellation" of the effect of the DTF
+// when encoding linear values to the render target. Hence, to remain
+// a perceptually correct radiance level, by applying the "cancellation"
+// or inverse of the DTF, which is called Gamma Correction.
+// Gamma correction also means gamma encode and a non linear operation that the display applies to the signal
+// is called gamma decode or gamma expansion.
+
+// In particular, before writing the values for the frame buffer (colour
+// returned by the pixel shader), a conversion must happen.
+
+// To convert linear values to sRGB values, we simply raise the linear value
+// by 1/2.2 (technically, there is a more accurate conversion that involves piecewise function).
+
+// Images and textures must be converted to linear values from sRGB values for use.
+// Hence, we simply raise the value by 2.2. At this point, the values are in linear space.
+// Indeed, if we load a texture from a PNG or JPEG, these can be directly send to the framebuffer
+// for display without conversion.
+
+// This discussion implies that we need to feed the monitor the right values for display. We know that the
+// monitor will raise our values with 2.2 (gamma expansion) to any energy we send to it.
+
+// For instance, if our shader output is x, the monitor output is x^2.2, which is not what we want.
+// hence, what we want to first raise x to 1/2.2 and the monitor output will be (x^(1/2.2))^(2.2) = x.
+
+float4 srgb_to_linear(float4 c)
+{
+  return float4(pow(c.xyz, 2.2f), c.a);
+}
+
 float4 ps_main(VertexShader_Output ps_inp) : SV_Target
 {
   float4 sample_colour     = ps_inp.colour;
