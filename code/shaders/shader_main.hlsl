@@ -27,14 +27,15 @@ cbuffer Constant_Store0 : register(b0)
 
 cbuffer Constant_Store1 : register(b1)
 {
-  float3     eye_p;
   uint       enable_texture;
-
-  float      time_accum;
   uint       enable_reflections;
-  uint       light_count;
-  float      _pad_a[1];
+  float      _pad_c1_a[2];
+};
 
+cbuffer Constant_Store2 : register(b2)
+{
+  float3     eye_p;
+  uint       light_count;
   Light      lights[MaxLightCount];
 };
 
@@ -44,6 +45,7 @@ struct Model_Instance
   float3x3 model_to_world_xform_inverse_transpose;
   float3 p;
   float4 colour;
+  uint enable_lighting;
 };
 
 struct VertexShader_Input
@@ -61,11 +63,17 @@ struct VertexShader_Output
   float4 colour    : ColourMod;
   float2 uv        : TextureUV;
 
-  float3 world_p   : WorldP;
-  float3 normal    : SurfaceNormal;
+  nointerpolation uint enable_lighting    : EnableLighting;
+  float3 world_p                          : WorldP;
+  float3 normal                           : SurfaceNormal;
 };
 
-StructuredBuffer<Model_Instance> g_model_instances : register(t0);
+StructuredBuffer<Model_Instance>   g_model_instances   : register(t0);
+Texture2D<float4>                  g_diffuse_map       : register(t1);
+Texture2D<float4>                  g_normal_map        : register(t2);
+Texture2D<float4>                  g_displace_map      : register(t3);
+
+SamplerState g_sample_linear_all : register(s0);
 
 VertexShader_Output
 vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
@@ -80,8 +88,9 @@ vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
   result.colour    = instance.colour;
   result.uv        = vs_inp.uv;
   
-  result.world_p   = world_p;
-  result.normal    = vs_inp.n;
+  result.world_p         = world_p;
+  result.normal          = mul(instance.model_to_world_xform_inverse_transpose, vs_inp.n);
+  result.enable_lighting = instance.enable_lighting;
   return(result);
 }
 
@@ -123,5 +132,74 @@ float4 srgb_to_linear(float4 c)
 float4 ps_main(VertexShader_Output ps_inp) : SV_Target
 {
   float4 sample_colour     = ps_inp.colour;
-  return sample_colour;
+  if (enable_texture)
+  {
+    float4 texel             = g_diffuse_map.Sample(g_sample_linear_all, ps_inp.uv);
+    sample_colour           *= texel;
+  }
+
+  float M_diffuse     = 0.8f;
+  float M_specular    = 0.3f;
+  float M_ambient     = 1.0f;
+  float M_shininess   = 2.0f;
+  
+  float4 final_colour = 0;
+  if (ps_inp.enable_lighting)
+  {
+    float3 N            = normalize(ps_inp.normal);
+    float3 to_eye       = normalize(eye_p - ps_inp.world_p);
+    [unroll]
+    for (uint light_idx = 0; light_idx < light_count; ++light_idx)
+    {
+      Light light = lights[light_idx];
+      
+      switch (light.type)
+      {
+        case LightType_Directional:
+        {
+          float3 L          = normalize(light.dir);
+          float3 R          = normalize(reflect(L, N));
+          float3 H          = normalize(-L + to_eye);
+          float n_dot_l     = max(dot(N, -L), 0.0f);
+          //float r_dot_v     = max(dot(to_eye, R), 0.0f);
+          float r_dot_v     = max(dot(N, H), 0.0f);
+          
+          float4 diffuse    = M_diffuse * light.intensity * n_dot_l * sample_colour;
+          float4 specular   = M_specular * pow(r_dot_v, M_shininess) * light.intensity;
+          
+          final_colour      = saturate(diffuse + specular + final_colour);
+          //sample_colour.xyz *= n_dot_l;
+        } break;
+        
+        case LightType_Point:
+        {
+          float3 L        = light.P - ps_inp.world_p;
+          float  dist     = length(L);
+          L              /= dist;        
+          float r0        = 5.0f;
+          float rmax      = 50.0f;
+          float win       = pow(max(1.0f - pow(dist / rmax, 4.0f), 0.0f), 2.0f);
+          float atten     = win*(r0*r0 / (dist*dist + 0.01f));
+          
+          float3 R        = normalize(reflect(-L, N));
+          float3 H          = normalize(L + to_eye);
+          
+          float n_dot_l     = max(dot(N, -L), 0.0f);
+          float r_dot_v     = max(dot(N, H), 0.0f);
+          
+          float4 diffuse    = M_diffuse * light.intensity * n_dot_l * sample_colour;
+          float4 specular   = M_specular * pow(r_dot_v, M_shininess) * light.intensity;
+          
+          final_colour      = saturate((diffuse + specular)*atten + final_colour);
+        } break;
+      }
+    }
+  }
+  else
+  {
+    final_colour = sample_colour;
+  }
+  
+  final_colour = saturate(M_ambient * float4(0.1f, 0.1f, 0.1f, 1.0f) * sample_colour + final_colour);
+  return final_colour;
 }

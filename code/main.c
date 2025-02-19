@@ -18,6 +18,9 @@
 #include "my_math.c"
 #include "os/os_win32.c"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "./ext/stb_image.h"
+
 static HWND   g_w32_window;
 static s32    g_w32_window_width;
 static s32    g_w32_window_height;
@@ -34,12 +37,12 @@ static ID3D11DeviceContext              *g_dx11_dev_cont;
 static IDXGISwapChain1                  *g_dxgi_swap_chain;
 
 // Render Target Stuff
-//static s32                               g_dx11_resolution_width  = 1280;
-//static s32                               g_dx11_resolution_height = 720;
+static s32                               g_dx11_resolution_width  = 1280;
+static s32                               g_dx11_resolution_height = 720;
 //static s32                               g_dx11_resolution_width  = 640;
 //static s32                               g_dx11_resolution_height = 360;
-static s32                               g_dx11_resolution_width  = 320;
-static s32                               g_dx11_resolution_height = 180;
+//static s32                               g_dx11_resolution_width  = 320;
+//static s32                               g_dx11_resolution_height = 180;
 static ID3D11RenderTargetView           *g_dx11_back_buffer_rtv;
 
 // Blend State
@@ -60,25 +63,6 @@ static ID3D11DepthStencilView           *g_dx11_depth_stencil_dsv_main;
 
 // Depth Stencil States
 static ID3D11DepthStencilState          *g_dx11_depth_less_stencil_nope;
-
-// Main renderer state
-static ID3D11VertexShader               *g_dx11_vshader_main;
-static ID3D11PixelShader                *g_dx11_pshader_main;
-static ID3D11Buffer                     *g_dx11_cbuffer_main0;
-static ID3D11Buffer                     *g_dx11_cbuffer_main1;
-static ID3D11InputLayout                *g_dx11_input_layout;
-static ID3D11Buffer                     *g_dx11_sbuffer_model_instances;
-static ID3D11ShaderResourceView         *g_dx11_sbuffer_model_instances_srv;
-static D3D11_VIEWPORT                    g_dx11_viewport_main;
-
-// Static Textures
-static ID3D11ShaderResourceView         *g_dx11_tex2d_brick_diffuse_srv;
-static ID3D11ShaderResourceView         *g_dx11_tex2d_brick_normal_srv;
-static ID3D11ShaderResourceView         *g_dx11_tex2d_brick_displace_srv;
-
-static ID3D11ShaderResourceView         *g_dx11_tex2d_wood_diffuse_srv;
-static ID3D11ShaderResourceView         *g_dx11_tex2d_wood_normal_srv;
-static ID3D11ShaderResourceView         *g_dx11_tex2d_wood_displace_srv;
 
 typedef u16 Shader_Type;
 enum
@@ -101,6 +85,7 @@ typedef struct
   m33 model_to_world_xform_it;
   v3f p;
   v4f colour;
+  u32 enable_lighting;
 } Model_Instance;
 
 #define MaxLightCount 8
@@ -135,6 +120,18 @@ typedef struct
   u64 count;
 } Model_Instances;
 
+typedef union
+{
+  struct
+  {
+    ID3D11ShaderResourceView         *diffuse_srv;
+    //ID3D11ShaderResourceView         *specular_srv;
+    ID3D11ShaderResourceView         *normal_srv;
+    ID3D11ShaderResourceView         *displace_srv;
+  };
+  ID3D11ShaderResourceView *srvs[4];
+} DX11_Texture2D_PBR;
+
 __declspec(align(16)) typedef struct
 {
   m44 projection;
@@ -143,24 +140,43 @@ __declspec(align(16)) typedef struct
 
 __declspec(align(16)) typedef struct
 {
-  v3f eye_p;
-  u32 enable_texture;
   // ------------- 16 -------------- //
-  f32 time_accum;
+  u32 enable_texture;
   u32 enable_reflections;
+  f32 _pad_a[2];
+} DX11_CBuffer_Main1;
+
+__declspec(align(16)) typedef struct
+{
+  v3f eye_p;
   u32 light_count;
-  f32 _pad_a[1];
   // ------------- 16 -------------- //
   
   Light lights[MaxLightCount];
   // ------------- sizeof(lights) % 16 == 0 -------------- //
-} DX11_CBuffer_Main1;
+} DX11_CBuffer_Main2;
 
 typedef struct
 {
   ID3D11Buffer *vbuffer, *ibuffer;
   u32 struct_size, index_count;
 } DX11_Model;
+
+// Main renderer state
+static ID3D11VertexShader               *g_dx11_vshader_main;
+static ID3D11PixelShader                *g_dx11_pshader_main;
+static ID3D11Buffer                     *g_dx11_cbuffer_main0;
+static ID3D11Buffer                     *g_dx11_cbuffer_main1;
+static ID3D11Buffer                     *g_dx11_cbuffer_main2;
+static ID3D11InputLayout                *g_dx11_input_layout;
+static ID3D11Buffer                     *g_dx11_sbuffer_model_instances;
+static ID3D11ShaderResourceView         *g_dx11_sbuffer_model_instances_srv;
+static D3D11_VIEWPORT                    g_dx11_viewport_main;
+static u32                               g_light_count;
+static Light                             g_lights[MaxLightCount];
+static f32                               g_first_light_t;
+
+static DX11_Texture2D_PBR g_gray_brick_tex;
 
 static DX11_Model *g_dx11_current_model;
 static DX11_Model  g_dx11_cube_model;
@@ -247,10 +263,11 @@ dx11_create_texture2d_mipmapped(char *filename)
   ID3D11Texture2D          *tex    = 0;
   ID3D11ShaderResourceView *result = 0;
 
-  u32 texture_bpp               = 4;
-  u32 texture_width             = 0;
-  u32 texture_height            = 0;
-  u8 *texture_data              = 0;
+  s32 texture_comp              = 0;
+  s32 texture_bpp               = 4;
+  s32 texture_width             = 0;
+  s32 texture_height            = 0;
+  u8 *texture_data              = stbi_load(filename, &texture_width, &texture_height, &texture_comp, 4);
 
   D3D11_TEXTURE2D_DESC tex_desc;
   tex_desc.Width               = texture_width;
@@ -279,6 +296,9 @@ dx11_create_texture2d_mipmapped(char *filename)
   AssertHR(ID3D11Device1_CreateShaderResourceView(g_dx11_dev, (ID3D11Resource *)tex, &tex_srv_desc, &result));
 
   ID3D11DeviceContext_GenerateMips(g_dx11_dev_cont, result);
+
+  ID3D11Texture2D_Release(tex);
+  stbi_image_free(texture_data);
   return(result);
 }
 
@@ -292,6 +312,7 @@ add_model_instance(Model_Instances *instances, v3f p, v3f scale, m33 rotate, v4f
   result->model_to_world_xform_it               = m33_mul(m33_make_diag((v3f) { 1.0f / scale.x, 1.0f / scale.y, 1.0f / scale.z }), rotate);
   result->p                                     = p;
   result->colour                                = colour;
+  result->enable_lighting                       = 1;
   return(result);
 }
 
@@ -587,7 +608,7 @@ create_cube_model(void)
     22, 23, 20,
   };
   
-  return dx11_create_model(vbuffer, sizeof(vbuffer), sizeof(Model_Vertex), 
+  return dx11_create_model(vbuffer, sizeof(vbuffer), sizeof(Model_Vertex),
                            ibuffer, ArrayCount(ibuffer));
 }
 
@@ -644,7 +665,6 @@ dx11_create_devices(void)
     ExitProcess(1);
   }
 }
-
 
 static void
 dx11_create_swap_chain(void)
@@ -793,9 +813,9 @@ dx11_create_sampler_states(void)
   sam_desc.Filter              = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   //sam_desc.Filter = D3D11_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR;
   //sam_desc.Filter = D3D11_FILTER_ANISOTROPIC;
-  sam_desc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
-  sam_desc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
-  sam_desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+  sam_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sam_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sam_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
   sam_desc.MipLODBias = 0;
   //sam_desc.MaxAnisotropy = D3D11_REQ_MAXANISOTROPY;
   sam_desc.MaxAnisotropy = 1;
@@ -954,6 +974,7 @@ init_rendering_states(void)
   
   g_dx11_cbuffer_main0 = dx11_create_constant_buffer(sizeof(DX11_CBuffer_Main0), 0);
   g_dx11_cbuffer_main1 = dx11_create_constant_buffer(sizeof(DX11_CBuffer_Main1), 0);
+  g_dx11_cbuffer_main2 = dx11_create_constant_buffer(sizeof(DX11_CBuffer_Main2), 0);
   
   D3D11_BUFFER_DESC sbuffer_desc =
   {
@@ -986,8 +1007,23 @@ init_rendering_states(void)
   };
   
   g_dx11_cube_model       = create_cube_model();
-  g_dx11_sphere_model     = create_sphere_model(1.0f, 8);
+  g_dx11_sphere_model     = create_sphere_model(1.0f, 32);
   g_dx11_cylinder_model   = create_cylinder_model(1.0f, 1.0f, 4.0f, 8, 6);
+
+  g_gray_brick_tex.diffuse_srv           = dx11_create_texture2d_mipmapped("../data/textures/painted-white-brick/diffuse.png");
+  g_gray_brick_tex.normal_srv            = dx11_create_texture2d_mipmapped("../data/textures/painted-white-brick/normal.png");
+  g_gray_brick_tex.displace_srv          = dx11_create_texture2d_mipmapped("../data/textures/painted-white-brick/displacement.png");
+  
+  // Light Setup
+  g_light_count              = 2;
+  g_lights[0].P              = (v3f){ -5.0f, 25.0f, -5.0f };
+  g_lights[0].type           = LightType_Directional;
+  g_lights[0].intensity      = (v4f){ 0.7f, 0.7f, 0.7f, 1.0f };
+  g_lights[0].dir            = (v3f){ 0.5f, -1.0f, 0.5f };
+  
+  g_lights[1].P              = (v3f){ 40.0f, 10.0f, 3.0f };
+  g_lights[1].type           = LightType_Point;
+  g_lights[1].intensity      = (v4f){ 3.0f, 0.0f, 2.0f, 1.0f };
 }
 
 static void
@@ -998,6 +1034,28 @@ dx11_set_model(DX11_Model *model)
   ID3D11DeviceContext_IASetInputLayout(g_dx11_dev_cont, g_dx11_input_layout);
   ID3D11DeviceContext_IASetVertexBuffers(g_dx11_dev_cont, 0, 1, &(model->vbuffer), &(model->struct_size), &g_model_vertices_offsets);
   ID3D11DeviceContext_IASetIndexBuffer(g_dx11_dev_cont, model->ibuffer, DXGI_FORMAT_R32_UINT, 0);
+}
+
+static void
+dx11_set_texture(DX11_Texture2D_PBR *texture)
+{
+  DX11_CBuffer_Main1  cbuffer_main1   = {0};
+  cbuffer_main1.enable_texture        = !!texture;
+
+  if (texture)
+  {
+    ID3D11DeviceContext_PSSetShaderResources(g_dx11_dev_cont, 1, 3, texture->srvs);
+  }
+  else
+  {
+    ID3D11ShaderResourceView *srvs[3] = { 0, 0, 0 };
+    ID3D11DeviceContext_PSSetShaderResources(g_dx11_dev_cont, 1, 3, srvs);
+  }
+
+  D3D11_MAPPED_SUBRESOURCE mapped_subresource;
+  ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main1, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
+  CopyMemory(mapped_subresource.pData, &cbuffer_main1, sizeof(cbuffer_main1));
+  ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main1, 0);
 }
 
 static void
@@ -1130,6 +1188,10 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   {
     v3f_sub_eq(&scene->camera_p, v3f_scale(move_comp, camera_up));
   }
+  
+  g_first_light_t            += game_update_secs * 2.0f;
+  
+  g_lights[1].P              = (v3f){ 40.0f + 18*cosf(g_first_light_t), 10.0f, 40 + 18* sinf(g_first_light_t) };
 
   DX11_CBuffer_Main0 cbuffer0 =
   {
@@ -1142,6 +1204,14 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
                                        -v3f_inner(camera_right, scene->camera_p), -v3f_inner(camera_up, scene->camera_p), -v3f_inner(camera_front, scene->camera_p), 1.0f
                                      },
   };
+  
+  DX11_CBuffer_Main2 cbuffer_main2 =
+  {
+    .eye_p       = scene->camera_p,
+    .light_count = g_light_count,
+  };
+  CopyMemory(cbuffer_main2.lights, g_lights, sizeof(g_lights));
+  
 
   float clear_colour[4] = {0};
   ID3D11DeviceContext_ClearRenderTargetView(g_dx11_dev_cont, g_dx11_back_buffer_rtv, clear_colour);
@@ -1151,6 +1221,10 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main0, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
   CopyMemory(mapped_subresource.pData, &cbuffer0, sizeof(cbuffer0));
   ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main0, 0);
+  
+  ID3D11DeviceContext_Map(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main2, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource);
+  CopyMemory(mapped_subresource.pData, &cbuffer_main2, sizeof(cbuffer_main2));
+  ID3D11DeviceContext_Unmap(g_dx11_dev_cont, (ID3D11Resource *)g_dx11_cbuffer_main2, 0);
 
   ID3D11DeviceContext_IASetPrimitiveTopology(g_dx11_dev_cont, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   ID3D11DeviceContext_IASetInputLayout(g_dx11_dev_cont, g_dx11_input_layout);
@@ -1164,29 +1238,31 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   ID3D11DeviceContext_RSSetViewports(g_dx11_dev_cont, 1, &g_dx11_viewport_main);
   
   ID3D11DeviceContext_PSSetConstantBuffers(g_dx11_dev_cont, 1, 1, &g_dx11_cbuffer_main1);
+  ID3D11DeviceContext_PSSetConstantBuffers(g_dx11_dev_cont, 2, 1, &g_dx11_cbuffer_main2);
   ID3D11DeviceContext_PSSetShader(g_dx11_dev_cont, g_dx11_pshader_main, 0, 0);
+  ID3D11DeviceContext_PSSetSamplers(g_dx11_dev_cont, 0, 1, &g_dx11_sampler_linear_all);
   
   ID3D11DeviceContext_OMSetBlendState(g_dx11_dev_cont, g_dx11_blend_alpha, 0, 0xFFFFFFFF);
   ID3D11DeviceContext_OMSetDepthStencilState(g_dx11_dev_cont, g_dx11_depth_less_stencil_nope, 0);
   ID3D11DeviceContext_OMSetRenderTargets(g_dx11_dev_cont, 1, &g_dx11_back_buffer_rtv, g_dx11_depth_stencil_dsv_main);
-  
 
   f32 scene_width_size      = ((ScenePlatform_BlockCountWidth) * Scene_BlockWidth);
   f32 scene_depth_size      = ((ScenePlatform_BlockCountDepth) * Scene_BlockWidth);
   Model_Instances instances = {0};
   dx11_set_model(&g_dx11_cube_model);
   // platform
+  dx11_set_texture(&g_gray_brick_tex);
   for (s32 depth_idx = 0; depth_idx < ScenePlatform_BlockCountDepth; ++depth_idx)
   {
     for (s32 width_idx = 0; width_idx < ScenePlatform_BlockCountWidth; ++width_idx)
     {
       add_model_instance(&instances, (v3f){ (f32)(width_idx) * Scene_BlockWidth, 0.0f, (f32)(depth_idx) * Scene_BlockWidth },
-                        (v3f){ Scene_BlockWidth, Scene_BlockWidth, Scene_BlockWidth },
-                        m33_make_identity(),
-                        (v4f){ 0.5f, 0.5f, 0.5f, 1.0f });
+                         (v3f){ Scene_BlockWidth, Scene_BlockWidth, Scene_BlockWidth },
+                         m33_make_identity(),
+                         (v4f){ 0.5f, 0.5f, 0.5f, 1.0f });
     }
   }
-
+  
   // "roof"
 
   for (s32 line_idx = 0; line_idx < 2; ++line_idx)
@@ -1239,6 +1315,7 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   }
 
   dx11_draw_indexed_instanced(&instances);
+  dx11_set_texture(0);
   
   // pillars
   {
@@ -1284,6 +1361,11 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
     }
   }
 
+  for (u32 light_idx = 0; light_idx < g_light_count; ++light_idx)
+  {
+    Light light = g_lights[light_idx];
+    add_model_instance(&instances, light.P, (v3f){ 0.3f, 0.3f, 0.3f }, m33_make_identity(), light.intensity)->enable_lighting = 0;
+  }
   // reflective sphere
   {
     f32 sphere_x = scene_width_size * 0.5f;
@@ -1298,10 +1380,6 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
                       v3f_s(8.0f), m33_make_identity(), (v4f){ 1.0f, 1.0f, 1.0f, 1.0f });
   }
   
-  // sphere on top of pillars
-  {
-  }
-
   dx11_draw_indexed_instanced(&instances);
 }
 
