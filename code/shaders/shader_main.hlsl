@@ -80,11 +80,13 @@ SamplerState g_sample_linear_all : register(s0);
 VertexShader_Output
 vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
 {
+  Model_Instance instance = g_model_instances[iid];
+  
   // assumptions: vs_inp.t, vs_inp.b, and vs_inp.n is a basis
   // basis of R^3. The world coordinate system is standard basis.
-  float3 T = vs_inp.t;
-  float3 B = vs_inp.b;
-  float3 N = vs_inp.n;
+  float3 T = mul(instance.model_to_world_xform_inverse_transpose, vs_inp.t);
+  float3 B = mul(instance.model_to_world_xform_inverse_transpose, vs_inp.b);
+  float3 N = mul(instance.model_to_world_xform_inverse_transpose, vs_inp.n);
   
   B = B - ((dot(B, T) / dot(T, T)) * T);
   N = N - ((dot(N, T) / dot(T, T)) * T) - ((dot(N, B) / dot(B, B)) * B);
@@ -95,7 +97,6 @@ vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
   
   VertexShader_Output result = (VertexShader_Output)0;
 
-  Model_Instance instance = g_model_instances[iid];
   float3 world_p          = mul(instance.model_to_world_xform, vs_inp.p) + instance.p;
   float4 camera_p         = mul(world_basis_to_camera_basis, float4(world_p, 1.0f));
   
@@ -104,7 +105,8 @@ vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
                                    T.y, B.y, N.y,
                                    T.z, B.z, N.z);
   // Matrix of a linear map from World Basis to World Basis
-  result.TBN_to_world = mul(instance.model_to_world_xform_inverse_transpose, TBN_to_world);
+  //result.TBN_to_world_t = mul(instance.model_to_world_xform_inverse_transpose, TBN_to_world);
+  result.TBN_to_world   = TBN_to_world;
 
   result.p         = mul(projection, camera_p);
   result.colour    = instance.colour;
@@ -151,18 +153,62 @@ float4 srgb_to_linear(float4 c)
   return float4(pow(c.xyz, 2.2f), c.a);
 }
 
+float2 parallax_uv(float3 view_dir, float3 N, float2 tex_coord, float2 dx, float2 dy)
+{
+  float  height_scale_tweak        = 0.05f;
+  uint   sample_count_min_tweak    = 8;
+  uint   sample_count_max_tweak    = 32;
+  float  sample_count              = 32;//lerp((float)sample_count_max_tweak, (float)sample_count_min_tweak, max(dot(view_dir, N), 0.0f));
+  
+  float  depth_sample_step         = 1.0f / sample_count;
+  float2 largest_parallax_offset   = (view_dir.xy / view_dir.z) * (-height_scale_tweak);
+  float2 tex_sample_step           = largest_parallax_offset / sample_count;
+  tex_sample_step.y               *= -1.0f;
+  
+  float  current_sample_depth      = 0.0f;
+  float2 current_tex_coords        = tex_coord;
+  float  current_depth_map_value   = 1.0f - g_displace_map.SampleGrad(g_sample_linear_all, current_tex_coords, dx, dy).r;
+  
+  while (current_sample_depth < current_depth_map_value)
+  {
+    current_tex_coords       += tex_sample_step;
+    current_depth_map_value   = 1.0f - g_displace_map.SampleGrad(g_sample_linear_all, current_tex_coords, dx, dy).r;
+    current_sample_depth     += depth_sample_step;
+  }
+  
+  float2 tex_coord_before        = current_tex_coords - tex_sample_step;
+  float  depth_after             = current_depth_map_value - current_sample_depth;
+  float  prev_depth_map_value    = 1.0f - g_displace_map.SampleGrad(g_sample_linear_all, tex_coord_before, dx, dy).r;
+  float  depth_before            = prev_depth_map_value - current_sample_depth + depth_sample_step;
+  float  t_value                 = depth_after / (depth_after - depth_before);
+  float2 result                  = float2(t_value * tex_coord_before + (1.0f - t_value) * current_tex_coords);
+  return result;
+}
+
 float4 ps_main(VertexShader_Output ps_inp) : SV_Target
 {
   float4 sample_colour     = ps_inp.colour;
-  float3 N            = normalize(ps_inp.normal);
+  float3 N                 = normalize(ps_inp.normal);
+  float3 to_eye            = normalize(eye_p - ps_inp.world_p);
   
   if (enable_texture)
   {
-    float2 tex_coord_tweak   = ps_inp.uv;
+    float3x3 world_to_TBN    = transpose(ps_inp.TBN_to_world);
+    float3   TBN_E           = mul(world_to_TBN, to_eye);
+    float3   TBN_N           = mul(world_to_TBN, N);
+    
     float2 dx                = ddx(ps_inp.uv);
     float2 dy                = ddy(ps_inp.uv);
+    float2 tex_coord_tweak   = parallax_uv(TBN_E, TBN_N, ps_inp.uv, dx, dy);
     
-    float4 texel             = g_diffuse_map.Sample(g_sample_linear_all, tex_coord_tweak);
+    if (((tex_coord_tweak.x > 1.0f) || (tex_coord_tweak.x < 0.0f)) ||
+        ((tex_coord_tweak.y > 1.0f) || (tex_coord_tweak.y < 0.0f)))
+    {
+      discard;
+    }
+
+    
+    float4 texel             = g_diffuse_map.SampleGrad(g_sample_linear_all, tex_coord_tweak, dx, dy);
     sample_colour           *= texel;
     
     //return g_normal_map.SampleGrad(g_sample_linear_all, tex_coord_tweak, dx, dy);
@@ -178,7 +224,6 @@ float4 ps_main(VertexShader_Output ps_inp) : SV_Target
   float4 final_colour = 0;
   if (ps_inp.enable_lighting)
   {
-    float3 to_eye       = normalize(eye_p - ps_inp.world_p);
     [unroll]
     for (uint light_idx = 0; light_idx < light_count; ++light_idx)
     {
@@ -215,7 +260,7 @@ float4 ps_main(VertexShader_Output ps_inp) : SV_Target
           float3 R        = normalize(reflect(-L, N));
           float3 H          = normalize(L + to_eye);
           
-          float n_dot_l     = max(dot(N, -L), 0.0f);
+          float n_dot_l     = max(dot(N, L), 0.0f);
           float r_dot_v     = max(dot(N, H), 0.0f);
           
           float4 diffuse    = M_diffuse * light.intensity * n_dot_l * sample_colour;

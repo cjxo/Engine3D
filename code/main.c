@@ -177,6 +177,7 @@ static Light                             g_lights[MaxLightCount];
 static f32                               g_first_light_t;
 
 static DX11_Texture2D_PBR g_gray_brick_tex;
+static DX11_Texture2D_PBR g_oak_trunk_tex;
 
 static DX11_Model *g_dx11_current_model;
 static DX11_Model  g_dx11_cube_model;
@@ -1008,11 +1009,15 @@ init_rendering_states(void)
   
   g_dx11_cube_model       = create_cube_model();
   g_dx11_sphere_model     = create_sphere_model(1.0f, 32);
-  g_dx11_cylinder_model   = create_cylinder_model(1.0f, 1.0f, 4.0f, 8, 6);
+  g_dx11_cylinder_model   = create_cylinder_model(1.0f, 1.0f, 4.0f, 32, 24);
 
-  g_gray_brick_tex.diffuse_srv           = dx11_create_texture2d_mipmapped("../data/textures/painted-white-brick/diffuse.png");
-  g_gray_brick_tex.normal_srv            = dx11_create_texture2d_mipmapped("../data/textures/painted-white-brick/normal.png");
-  g_gray_brick_tex.displace_srv          = dx11_create_texture2d_mipmapped("../data/textures/painted-white-brick/displacement.png");
+  g_gray_brick_tex.diffuse_srv           = dx11_create_texture2d_mipmapped("../data/textures/sloppy-mortar-stone-wall/diffuse.png");
+  g_gray_brick_tex.normal_srv            = dx11_create_texture2d_mipmapped("../data/textures/sloppy-mortar-stone-wall/normal.png");
+  g_gray_brick_tex.displace_srv          = dx11_create_texture2d_mipmapped("../data/textures/sloppy-mortar-stone-wall/displacement.png");
+  
+  g_oak_trunk_tex.diffuse_srv           = dx11_create_texture2d_mipmapped("../data/textures/mature-oak-tree/diffuse.png");
+  g_oak_trunk_tex.normal_srv            = dx11_create_texture2d_mipmapped("../data/textures/mature-oak-tree/normal.png");
+  g_oak_trunk_tex.displace_srv          = dx11_create_texture2d_mipmapped("../data/textures/mature-oak-tree/displacement.png");
   
   // Light Setup
   g_light_count              = 2;
@@ -1315,6 +1320,7 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   }
 
   dx11_draw_indexed_instanced(&instances);
+  //dx11_set_texture(&g_oak_trunk_tex);
   dx11_set_texture(0);
   
   // pillars
@@ -1331,17 +1337,29 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
       for (s32 pillar_idx = 0; pillar_idx < Scene_PillarCount; ++pillar_idx)
       {
         f32 x = (scene_width_size * pillar_set_idx - Scene_BlockWidth * pillar_set_idx);
-        f32 y = 9.0f;
+        f32 y = 5.0f;
         f32 z = (f32)pillar_idx * cylinder_diameter + offset_per_pillar * pillar_idx + offset;
+        
+        add_model_instance(&instances, (v3f) { x, y + 8.0f, z },
+                          (v3f){ 1.0f, 1.0f, 1.0f }, m33_make_identity(), (v4f){ 1.0f, 1.0f, 1.0f, 1.0f });
+                          
+        add_model_instance(&instances, (v3f) { x, y + 4.0f, z },
+                          (v3f){ 1.0f, 1.0f, 1.0f }, m33_make_identity(), (v4f){ 1.0f, 1.0f, 1.0f, 1.0f });
+                          
         add_model_instance(&instances, (v3f) { x, y, z },
-                          (v3f){ 1.0f, 4.0f, 1.0f }, m33_make_identity(), (v4f){ 1.0f, 0.0f, 0.0f, 1.0f });
+                          (v3f){ 1.0f, 1.0f, 1.0f }, m33_make_identity(), (v4f){ 1.0f, 1.0f, 1.0f, 1.0f });
+                          
+        add_model_instance(&instances, (v3f) { x, y - 4.0f, z },
+                          (v3f){ 1.0f, 1.0f, 1.0f }, m33_make_identity(), (v4f){ 1.0f, 1.0f, 1.0f, 1.0f });
 
 
         add_model_instance(&instances, (v3f) { x  + (Scene_BlockWidth * 4 * (pillar_set_idx == 0 ? 1 : -1)), 5, z },
                           (v3f){ 2.0f, 2.0f, 2.0f }, m33_make_identity(), (v4f){ 0.0f, 1.0f, 1.0f, 1.0f });
       }
     }
+    
     dx11_draw_indexed_instanced(&instances);
+    //dx11_set_texture(0);
 
     dx11_set_model(&g_dx11_sphere_model);
 
