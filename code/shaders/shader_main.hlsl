@@ -66,6 +66,8 @@ struct VertexShader_Output
   nointerpolation uint enable_lighting    : EnableLighting;
   float3 world_p                          : WorldP;
   float3 normal                           : SurfaceNormal;
+  
+  float3x3 TBN_to_world         : TBNToWorld;
 };
 
 StructuredBuffer<Model_Instance>   g_model_instances   : register(t0);
@@ -78,11 +80,31 @@ SamplerState g_sample_linear_all : register(s0);
 VertexShader_Output
 vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
 {
+  // assumptions: vs_inp.t, vs_inp.b, and vs_inp.n is a basis
+  // basis of R^3. The world coordinate system is standard basis.
+  float3 T = vs_inp.t;
+  float3 B = vs_inp.b;
+  float3 N = vs_inp.n;
+  
+  B = B - ((dot(B, T) / dot(T, T)) * T);
+  N = N - ((dot(N, T) / dot(T, T)) * T) - ((dot(N, B) / dot(B, B)) * B);
+  
+  T = normalize(T);
+  B = normalize(B);
+  N = normalize(N);
+  
   VertexShader_Output result = (VertexShader_Output)0;
 
   Model_Instance instance = g_model_instances[iid];
   float3 world_p          = mul(instance.model_to_world_xform, vs_inp.p) + instance.p;
   float4 camera_p         = mul(world_basis_to_camera_basis, float4(world_p, 1.0f));
+  
+  // Matrix of an identity map from the TBN basis to World Basis  
+  float3x3 TBN_to_world = float3x3(T.x, B.x, N.x,
+                                   T.y, B.y, N.y,
+                                   T.z, B.z, N.z);
+  // Matrix of a linear map from World Basis to World Basis
+  result.TBN_to_world = mul(instance.model_to_world_xform_inverse_transpose, TBN_to_world);
 
   result.p         = mul(projection, camera_p);
   result.colour    = instance.colour;
@@ -132,21 +154,30 @@ float4 srgb_to_linear(float4 c)
 float4 ps_main(VertexShader_Output ps_inp) : SV_Target
 {
   float4 sample_colour     = ps_inp.colour;
+  float3 N            = normalize(ps_inp.normal);
+  
   if (enable_texture)
   {
-    float4 texel             = g_diffuse_map.Sample(g_sample_linear_all, ps_inp.uv);
+    float2 tex_coord_tweak   = ps_inp.uv;
+    float2 dx                = ddx(ps_inp.uv);
+    float2 dy                = ddy(ps_inp.uv);
+    
+    float4 texel             = g_diffuse_map.Sample(g_sample_linear_all, tex_coord_tweak);
     sample_colour           *= texel;
+    
+    //return g_normal_map.SampleGrad(g_sample_linear_all, tex_coord_tweak, dx, dy);
+    N = g_normal_map.SampleGrad(g_sample_linear_all, tex_coord_tweak, dx, dy).xyz * 2.0f - 1.0f;
+    N = normalize(mul(ps_inp.TBN_to_world, N));
   }
 
-  float M_diffuse     = 0.8f;
-  float M_specular    = 0.3f;
+  float M_diffuse     = 1.0f;
+  float M_specular    = 0.5f;
   float M_ambient     = 1.0f;
-  float M_shininess   = 2.0f;
+  float M_shininess   = 8.0f;
   
   float4 final_colour = 0;
   if (ps_inp.enable_lighting)
   {
-    float3 N            = normalize(ps_inp.normal);
     float3 to_eye       = normalize(eye_p - ps_inp.world_p);
     [unroll]
     for (uint light_idx = 0; light_idx < light_count; ++light_idx)
