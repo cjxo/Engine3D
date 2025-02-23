@@ -814,9 +814,9 @@ dx11_create_sampler_states(void)
   sam_desc.Filter              = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   //sam_desc.Filter = D3D11_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR;
   //sam_desc.Filter = D3D11_FILTER_ANISOTROPIC;
-  sam_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-  sam_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-  sam_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sam_desc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+  sam_desc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+  sam_desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
   sam_desc.MipLODBias = 0;
   //sam_desc.MaxAnisotropy = D3D11_REQ_MAXANISOTROPY;
   sam_desc.MaxAnisotropy = 1;
@@ -1246,6 +1246,7 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   ID3D11DeviceContext_PSSetConstantBuffers(g_dx11_dev_cont, 2, 1, &g_dx11_cbuffer_main2);
   ID3D11DeviceContext_PSSetShader(g_dx11_dev_cont, g_dx11_pshader_main, 0, 0);
   ID3D11DeviceContext_PSSetSamplers(g_dx11_dev_cont, 0, 1, &g_dx11_sampler_linear_all);
+  ID3D11DeviceContext_PSSetSamplers(g_dx11_dev_cont, 1, 1, &g_dx11_sampler_point_all);
   
   ID3D11DeviceContext_OMSetBlendState(g_dx11_dev_cont, g_dx11_blend_alpha, 0, 0xFFFFFFFF);
   ID3D11DeviceContext_OMSetDepthStencilState(g_dx11_dev_cont, g_dx11_depth_less_stencil_nope, 0);
@@ -1320,8 +1321,8 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
   }
 
   dx11_draw_indexed_instanced(&instances);
-  //dx11_set_texture(&g_oak_trunk_tex);
-  dx11_set_texture(0);
+  dx11_set_texture(&g_oak_trunk_tex);
+  //dx11_set_texture(0);
   
   // pillars
   {
@@ -1359,7 +1360,7 @@ scene_update_and_render(Scene_State *scene, f32 game_update_secs)
     }
     
     dx11_draw_indexed_instanced(&instances);
-    //dx11_set_texture(0);
+    dx11_set_texture(0);
 
     dx11_set_model(&g_dx11_sphere_model);
 

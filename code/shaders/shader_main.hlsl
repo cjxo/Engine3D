@@ -76,6 +76,7 @@ Texture2D<float4>                  g_normal_map        : register(t2);
 Texture2D<float4>                  g_displace_map      : register(t3);
 
 SamplerState g_sample_linear_all : register(s0);
+SamplerState g_sample_point_all : register(s1);
 
 VertexShader_Output
 vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
@@ -157,8 +158,8 @@ float2 parallax_uv(float3 view_dir, float3 N, float2 tex_coord, float2 dx, float
 {
   float  height_scale_tweak        = 0.05f;
   uint   sample_count_min_tweak    = 8;
-  uint   sample_count_max_tweak    = 32;
-  float  sample_count              = 32;//lerp((float)sample_count_max_tweak, (float)sample_count_min_tweak, max(dot(view_dir, N), 0.0f));
+  uint   sample_count_max_tweak    = 64;
+  float  sample_count              = (float)lerp((float)sample_count_max_tweak, (float)sample_count_min_tweak, dot(view_dir, -N));
   
   float  depth_sample_step         = 1.0f / sample_count;
   float2 largest_parallax_offset   = (view_dir.xy / view_dir.z) * (-height_scale_tweak);
@@ -185,6 +186,55 @@ float2 parallax_uv(float3 view_dir, float3 N, float2 tex_coord, float2 dx, float
   return result;
 }
 
+float2 parallax_uv2(float3 view_dir, float3 N, float2 tex_coord, float2 dx, float2 dy)
+{
+  float  height_scale_tweak     = 0.04f;
+  uint   min_sample_count_tweak = 8;
+  uint   max_sample_count_tweak = 48;
+  
+  uint   sample_count           = max_sample_count_tweak;
+  float  sample_countf           = (float)lerp((float)max_sample_count_tweak, (float)min_sample_count_tweak, dot(view_dir, -N));
+  
+  float2 max_parallax_offset = ((-height_scale_tweak) * view_dir.xy) / view_dir.z;
+  float  depth_step          = 1.0f / sample_countf;
+  float2 tex_step            = max_parallax_offset / sample_countf;
+  tex_step.y                *= -1.0f;
+  
+  uint   sample_idx              = 0;
+  float2 current_tex_offset      = 0.0f;
+  float2 prev_tex_offset         = 0.0f;
+  float  current_depth           = 1.0f - depth_step;
+  float  previous_depth          = 1.0f;
+  float  current_map_depth       = 0.0f;
+  float  previous_map_depth      = 0.0f;
+  float2 final_tex_offset        = 0.0f;  
+  while (sample_idx <= sample_count)
+  {
+    current_map_depth = g_displace_map.SampleGrad(g_sample_linear_all, tex_coord + current_tex_offset, dx, dy).r;
+    
+    if (current_depth < current_map_depth)
+    {
+      float t             = (previous_map_depth - previous_depth) / (current_depth - previous_depth - current_map_depth + previous_map_depth);
+      final_tex_offset    = prev_tex_offset + t * tex_step;
+      
+      sample_idx = sample_count + 1;
+    }
+    else
+    {
+      ++sample_idx;
+      
+      prev_tex_offset       = current_tex_offset;
+      previous_depth        = current_depth;
+      previous_map_depth    = current_map_depth;
+      
+      current_tex_offset   += tex_step;
+      current_depth        -= depth_step;
+    }
+  }
+  
+  return tex_coord + final_tex_offset;
+}
+
 float4 ps_main(VertexShader_Output ps_inp) : SV_Target
 {
   float4 sample_colour     = ps_inp.colour;
@@ -194,19 +244,20 @@ float4 ps_main(VertexShader_Output ps_inp) : SV_Target
   if (enable_texture)
   {
     float3x3 world_to_TBN    = transpose(ps_inp.TBN_to_world);
-    float3   TBN_E           = mul(world_to_TBN, to_eye);
-    float3   TBN_N           = mul(world_to_TBN, N);
+    float3   TBN_E           = normalize(mul(world_to_TBN, to_eye));
+    float3   TBN_N           = normalize(mul(world_to_TBN, N));
     
     float2 dx                = ddx(ps_inp.uv);
     float2 dy                = ddy(ps_inp.uv);
-    float2 tex_coord_tweak   = parallax_uv(TBN_E, TBN_N, ps_inp.uv, dx, dy);
+    float2 tex_coord_tweak   = parallax_uv2(TBN_E, TBN_N, ps_inp.uv, dx, dy);
     
+#if 0
     if (((tex_coord_tweak.x > 1.0f) || (tex_coord_tweak.x < 0.0f)) ||
         ((tex_coord_tweak.y > 1.0f) || (tex_coord_tweak.y < 0.0f)))
     {
       discard;
     }
-
+#endif
     
     float4 texel             = g_diffuse_map.SampleGrad(g_sample_linear_all, tex_coord_tweak, dx, dy);
     sample_colour           *= texel;
