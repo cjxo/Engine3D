@@ -74,9 +74,11 @@ StructuredBuffer<Model_Instance>   g_model_instances   : register(t0);
 Texture2D<float4>                  g_diffuse_map       : register(t1);
 Texture2D<float4>                  g_normal_map        : register(t2);
 Texture2D<float4>                  g_displace_map      : register(t3);
+Texture2D<float4>                  g_shadow_map        : register(t4);
 
 SamplerState g_sample_linear_all : register(s0);
-SamplerState g_sample_point_all : register(s1);
+SamplerState g_sample_point_all  : register(s1);
+SamplerComparisonState sampler_shadow : register(s2);
 
 VertexShader_Output
 vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
@@ -116,6 +118,20 @@ vs_main(VertexShader_Input vs_inp, uint iid : SV_InstanceID)
   result.world_p         = world_p;
   result.normal          = mul(instance.model_to_world_xform_inverse_transpose, vs_inp.n);
   result.enable_lighting = instance.enable_lighting;
+  return(result);
+}
+
+float4
+vs_depth_only(VertexShader_Input vs_inp, uint iid : SV_InstanceID) : SV_Position
+{
+  Model_Instance instance = g_model_instances[iid];
+  if ((instance.p.x == lights[0].P.x) && (instance.p.y == lights[0].P.y) && (instance.p.z == lights[0].P.z))
+  {
+    return float4(0,0,0,0);
+  }
+  float3 world_p          = mul(instance.model_to_world_xform, vs_inp.p) + instance.p;
+  float4 camera_p         = mul(lights[0].world_to_light, float4(world_p, 1.0f));
+  float4 result           = mul(lights[0].projection, camera_p);
   return(result);
 }
 
@@ -192,8 +208,8 @@ float2 parallax_uv2(float3 view_dir, float3 N, float2 tex_coord, float2 dx, floa
   uint   min_sample_count_tweak = 8;
   uint   max_sample_count_tweak = 48;
   
-  uint   sample_count           = max_sample_count_tweak;
-  float  sample_countf           = (float)lerp((float)max_sample_count_tweak, (float)min_sample_count_tweak, dot(view_dir, -N));
+  float  sample_countf           = (float)lerp((float)max_sample_count_tweak, (float)min_sample_count_tweak, max(dot(view_dir, -N), 0.0f));
+  uint   sample_count            = (uint)sample_countf;
   
   float2 max_parallax_offset = ((-height_scale_tweak) * view_dir.xy) / view_dir.z;
   float  depth_step          = 1.0f / sample_countf;
@@ -251,20 +267,55 @@ float4 ps_main(VertexShader_Output ps_inp) : SV_Target
     float2 dy                = ddy(ps_inp.uv);
     float2 tex_coord_tweak   = parallax_uv2(TBN_E, TBN_N, ps_inp.uv, dx, dy);
     
-#if 0
-    if (((tex_coord_tweak.x > 1.0f) || (tex_coord_tweak.x < 0.0f)) ||
-        ((tex_coord_tweak.y > 1.0f) || (tex_coord_tweak.y < 0.0f)))
-    {
-      discard;
-    }
-#endif
-    
     float4 texel             = g_diffuse_map.SampleGrad(g_sample_linear_all, tex_coord_tweak, dx, dy);
     sample_colour           *= texel;
     
     //return g_normal_map.SampleGrad(g_sample_linear_all, tex_coord_tweak, dx, dy);
     N = g_normal_map.SampleGrad(g_sample_linear_all, tex_coord_tweak, dx, dy).xyz * 2.0f - 1.0f;
     N = normalize(mul(ps_inp.TBN_to_world, N));
+  }
+
+  float shadow_multiplier = 0.0f;
+  {
+    Light light         = lights[0];
+    float4 light_p      = mul(light.world_to_light, float4(ps_inp.world_p, 1.0f));
+    light_p             = mul(light.projection, light_p);
+    light_p.xyz        /= light_p.w;
+
+    if (light_p.z > 1)
+    {
+      shadow_multiplier = 1.0f;
+    }
+    else
+    {
+      float  bias           = max(0.005f * (1.0f - dot(N, -light.dir)), 0.0005f);
+      float  current_depth  = light_p.z - bias;
+      float2 shadow_tex_p   = float2(light_p.x * 0.5f + 0.5f, 1.0f - (light_p.y * 0.5f + 0.5f));
+      float2 texel_size     = 1.0f / 1024.0f;
+      float2 texel_p        = shadow_tex_p * 1024.0f;
+      //float4 subpixel       = float4(frac(texel_p), 1.0f - frac(texel_p));
+      //float4 bilinear       = subpixel.zxzx * subpixel.wwyy;
+      float2 t              = frac(texel_p);
+      
+      [unroll]  
+      for(int x = -1; x <= 1; ++x)
+      {
+        [unroll]  
+        for(int y = -1; y <= 1; ++y)
+        {
+          float2 uv            = shadow_tex_p + float2(x, y) * texel_size;
+          float s0             = g_shadow_map.Sample(g_sample_point_all, uv).r;
+          float s1             = g_shadow_map.Sample(g_sample_point_all, uv + float2(texel_size.x, 0.0f)).r;
+          float s2             = g_shadow_map.Sample(g_sample_point_all, uv + float2(0.0f, texel_size.y)).r;
+          float s3             = g_shadow_map.Sample(g_sample_point_all, uv + texel_size).r;
+          float4 tests         = (current_depth < float4(s0, s1, s2, s3)) ? 1.0f : 0.4f;
+          //shadow_multiplier   += dot(bilinear, tests);
+	  shadow_multiplier   += lerp(lerp(tests.x, tests.y, t.x), lerp(tests.z, tests.w, t.x), t.y);
+        }
+      }
+
+      shadow_multiplier /= 9.0f;
+    }
   }
 
   float M_diffuse     = 1.0f;
@@ -294,7 +345,7 @@ float4 ps_main(VertexShader_Output ps_inp) : SV_Target
           float4 diffuse    = M_diffuse * light.intensity * n_dot_l * sample_colour;
           float4 specular   = M_specular * pow(r_dot_v, M_shininess) * light.intensity;
           
-          final_colour      = saturate(diffuse + specular + final_colour);
+          final_colour      = saturate((diffuse + specular) * shadow_multiplier + final_colour);
           //sample_colour.xyz *= n_dot_l;
         } break;
         
